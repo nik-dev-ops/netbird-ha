@@ -24,6 +24,7 @@ import (
 	"github.com/netbirdio/netbird/formatter/hook"
 	"github.com/netbirdio/netbird/management/internals/server"
 	nbconfig "github.com/netbirdio/netbird/management/internals/server/config"
+	mgmtdistributed "github.com/netbirdio/netbird/management/server/distributed"
 	nbdomain "github.com/netbirdio/netbird/shared/management/domain"
 	"github.com/netbirdio/netbird/util"
 	"github.com/netbirdio/netbird/util/crypt"
@@ -60,6 +61,14 @@ var (
 			config, err = LoadMgmtConfig(ctx, nbconfig.MgmtConfigPath)
 			if err != nil {
 				return fmt.Errorf("failed reading provided config file: %s: %v", nbconfig.MgmtConfigPath, err)
+			}
+
+			// Populate HA config from environment if not present in config file
+			if config.HA == nil {
+				haCfg := mgmtdistributed.LoadManagementHAConfigFromEnv()
+				if haCfg.Enabled {
+					config.HA = &haCfg.HAConfig
+				}
 			}
 
 			if cmd.Flag(idpSignKeyRefreshEnabledFlagName).Changed {

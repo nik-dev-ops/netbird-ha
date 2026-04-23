@@ -39,6 +39,8 @@ import (
 	"github.com/netbirdio/netbird/management/server/activity"
 	"github.com/netbirdio/netbird/management/server/auth"
 	nbContext "github.com/netbirdio/netbird/management/server/context"
+	mgmtdistributed "github.com/netbirdio/netbird/management/server/distributed"
+	"github.com/netbirdio/netbird/shared/distributed"
 	nbpeer "github.com/netbirdio/netbird/management/server/peer"
 	"github.com/netbirdio/netbird/management/server/posture"
 	"github.com/netbirdio/netbird/management/server/settings"
@@ -56,6 +58,15 @@ const (
 	defaultSyncLim = 1000
 )
 
+// NoopLock provides local-only locking for backward compatibility when HA is disabled.
+type NoopLock struct{ mu sync.Mutex }
+
+// Acquire locks the local mutex and returns an unlock function.
+func (l *NoopLock) Acquire(ctx context.Context, resource string, ttl time.Duration) (func(), error) {
+	l.mu.Lock()
+	return l.mu.Unlock, nil
+}
+
 // Server an instance of a Management gRPC API server
 type Server struct {
 	accountManager  account.Manager
@@ -65,7 +76,7 @@ type Server struct {
 	config         *nbconfig.Config
 	secretsManager SecretsManager
 	appMetrics     telemetry.AppMetrics
-	peerLocks      sync.Map
+	peerLocks      mgmtdistributed.Lock
 	authManager    auth.Manager
 
 	logBlockedPeers          bool
@@ -98,6 +109,8 @@ func NewServer(
 	integratedPeerValidator integrated_validator.IntegratedValidator,
 	networkMapController network_map.Controller,
 	oAuthConfigProvider idp.OAuthConfigProvider,
+	peerLocks mgmtdistributed.Lock,
+	redisClient *distributed.Client,
 ) (*Server, error) {
 	if appMetrics != nil {
 		// update gauge based on number of connected peers which is equal to open gRPC streams
@@ -127,6 +140,17 @@ func NewServer(
 		}
 	}
 
+	var lf *loginFilter
+	if redisClient != nil {
+		lf = newLoginFilterWithRedis(redisClient, mgmtdistributed.DefaultManagementHAConfig().LoginFilterKey)
+	} else {
+		lf = newLoginFilter()
+	}
+
+	if peerLocks == nil {
+		peerLocks = &NoopLock{}
+	}
+
 	return &Server{
 		jobManager:               jobManager,
 		accountManager:           accountManager,
@@ -135,13 +159,14 @@ func NewServer(
 		secretsManager:           secretsManager,
 		authManager:              authManager,
 		appMetrics:               appMetrics,
+		peerLocks:                peerLocks,
 		logBlockedPeers:          logBlockedPeers,
 		blockPeersWithSameConfig: blockPeersWithSameConfig,
 		integratedPeerValidator:  integratedPeerValidator,
 		networkMapController:     networkMapController,
 		oAuthConfigProvider:      oAuthConfigProvider,
 
-		loginFilter: newLoginFilter(),
+		loginFilter: lf,
 
 		syncLim:        syncLim,
 		syncLimEnabled: syncLimEnabled,
@@ -573,14 +598,16 @@ func (s *Server) acquirePeerLockByUID(ctx context.Context, uniqueID string) (unl
 	log.WithContext(ctx).Tracef("acquiring peer lock for ID %s", uniqueID)
 
 	start := time.Now()
-	value, _ := s.peerLocks.LoadOrStore(uniqueID, &sync.RWMutex{})
-	mtx := value.(*sync.RWMutex)
-	mtx.Lock()
+	release, err := s.peerLocks.Acquire(ctx, uniqueID, 15*time.Second)
+	if err != nil {
+		log.WithContext(ctx).Warnf("failed to acquire peer lock for %s: %v", uniqueID, err)
+		return func() {}
+	}
 	log.WithContext(ctx).Tracef("acquired peer lock for ID %s in %v", uniqueID, time.Since(start))
 	start = time.Now()
 
 	unlock = func() {
-		mtx.Unlock()
+		release()
 		log.WithContext(ctx).Tracef("released peer lock for ID %s in %v", uniqueID, time.Since(start))
 	}
 

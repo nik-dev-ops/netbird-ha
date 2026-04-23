@@ -2,9 +2,11 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -15,8 +17,10 @@ import (
 	"google.golang.org/grpc/status"
 	gproto "google.golang.org/protobuf/proto"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/netbirdio/signal-dispatcher/dispatcher"
 
+	"github.com/netbirdio/netbird/shared/distributed"
 	"github.com/netbirdio/netbird/shared/signal/proto"
 	"github.com/netbirdio/netbird/signal/metrics"
 	"github.com/netbirdio/netbird/signal/peer"
@@ -59,10 +63,18 @@ type Server struct {
 	successHeader metadata.MD
 
 	sendTimeout time.Duration
+
+	// HA fields (nil when HA disabled)
+	haConfig     *SignalHAConfig
+	redisClient  *distributed.Client
+	instanceID   string
+	haCtx        context.Context
+	haCancel     context.CancelFunc
+	haWg         sync.WaitGroup
 }
 
 // NewServer creates a new Signal server
-func NewServer(ctx context.Context, meter metric.Meter, metricsPrefix ...string) (*Server, error) {
+func NewServer(ctx context.Context, meter metric.Meter, haConfig *SignalHAConfig, metricsPrefix ...string) (*Server, error) {
 	appMetrics, err := metrics.NewAppMetrics(meter, metricsPrefix...)
 	if err != nil {
 		return nil, fmt.Errorf("creating app metrics: %v", err)
@@ -86,21 +98,92 @@ func NewServer(ctx context.Context, meter metric.Meter, metricsPrefix ...string)
 		metrics:       appMetrics,
 		successHeader: metadata.Pairs(proto.HeaderRegistered, "1"),
 		sendTimeout:   sTimeout,
+		haConfig:      haConfig,
+	}
+
+	// Initialize HA if enabled
+	if haConfig != nil && haConfig.Enabled {
+		if err := s.initHA(ctx); err != nil {
+			return nil, fmt.Errorf("initializing HA: %w", err)
+		}
 	}
 
 	return s, nil
+}
+
+func (s *Server) initHA(ctx context.Context) error {
+	if err := s.haConfig.Validate(); err != nil {
+		return err
+	}
+
+	client, err := distributed.NewClient(s.haConfig.HAConfig)
+	if err != nil {
+		return fmt.Errorf("connecting to redis: %w", err)
+	}
+
+	s.redisClient = client
+	s.instanceID = s.haConfig.InstanceID
+	s.haCtx, s.haCancel = context.WithCancel(ctx)
+
+	// Subscribe to instance channel
+	channel := s.haConfig.ChannelPrefix + s.instanceID
+	pubsub := client.Subscribe(s.haCtx, channel)
+
+	// Start message listener
+	s.haWg.Add(1)
+	go s.haMessageListener(pubsub)
+
+	log.Infof("Signal HA initialized: instance=%s, redis=%s", s.instanceID, s.haConfig.RedisAddress)
+	return nil
 }
 
 // Send forwards a message to the signal peer
 func (s *Server) Send(ctx context.Context, msg *proto.EncryptedMessage) (*proto.EncryptedMessage, error) {
 	log.Tracef("received a new message to send from peer [%s] to peer [%s]", msg.Key, msg.RemoteKey)
 
+	// Fast path: local registry
 	if _, found := s.registry.Get(msg.RemoteKey); found {
 		s.forwardMessageToPeer(ctx, msg)
 		return &proto.EncryptedMessage{}, nil
 	}
 
+	// HA path: check distributed registry
+	if s.redisClient != nil {
+		instanceID, err := s.lookupPeerInstance(ctx, msg.RemoteKey)
+		if err == nil && instanceID != "" {
+			if instanceID == s.instanceID {
+				// Peer should be local but isn't — race condition, drop
+				log.Tracef("peer %s reported as local but not in registry", msg.RemoteKey)
+				return &proto.EncryptedMessage{}, nil
+			}
+
+			// Forward to remote instance
+			envelope := signalEnvelope{
+				FromInstance: s.instanceID,
+				ToPeer:       msg.RemoteKey,
+				Message:      msg,
+			}
+			payload, _ := json.Marshal(envelope)
+
+			channel := s.haConfig.ChannelPrefix + instanceID
+			if err := s.redisClient.Publish(ctx, channel, payload).Err(); err != nil {
+				log.Warnf("failed to publish message to instance %s: %v", instanceID, err)
+			} else {
+				log.Tracef("forwarded message to peer %s on instance %s", msg.RemoteKey, instanceID)
+				return &proto.EncryptedMessage{}, nil
+			}
+		}
+	}
+
+	// Fallback: try dispatcher (legacy behavior)
 	return s.dispatcher.SendMessage(ctx, msg)
+}
+
+func (s *Server) lookupPeerInstance(ctx context.Context, peerID string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	return s.redisClient.HGet(ctx, s.haConfig.RegistryKey, peerID).Result()
 }
 
 // ConnectStream connects to the exchange stream
@@ -143,6 +226,10 @@ func (s *Server) RegisterPeer(stream proto.SignalExchange_ConnectStreamServer, c
 	if err := s.registry.Register(p); err != nil {
 		return nil, err
 	}
+
+	// Register in distributed registry
+	s.registerPeerInRedis(p.Id)
+
 	err := s.dispatcher.ListenForMessages(stream.Context(), p.Id, s.forwardMessageToPeer)
 	if err != nil {
 		s.metrics.RegistrationFailures.Add(stream.Context(), 1, metric.WithAttributes(attribute.String(labelError, labelErrorFailedRegistration)))
@@ -156,6 +243,115 @@ func (s *Server) DeregisterPeer(p *peer.Peer) {
 	log.Debugf("peer disconnected [%s] [streamID %d] ", p.Id, p.StreamID)
 	s.metrics.PeerConnectionDuration.Record(p.Stream.Context(), int64(time.Since(p.RegisteredAt).Seconds()))
 	s.registry.Deregister(p)
+
+	// Deregister from distributed registry
+	s.deregisterPeerFromRedis(p.Id)
+}
+
+func (s *Server) registerPeerInRedis(peerID string) {
+	if s.redisClient == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(s.haCtx, 5*time.Second)
+	defer cancel()
+
+	if err := s.redisClient.HSet(ctx, s.haConfig.RegistryKey, peerID, s.instanceID).Err(); err != nil {
+		log.Warnf("failed to register peer %s in redis: %v", peerID, err)
+		return
+	}
+	if err := s.redisClient.Expire(ctx, s.haConfig.RegistryKey, s.haConfig.PeerTTL).Err(); err != nil {
+		log.Warnf("failed to set TTL for peer %s: %v", peerID, err)
+	}
+
+	// Start heartbeat
+	s.haWg.Add(1)
+	go s.peerHeartbeat(peerID)
+}
+
+func (s *Server) peerHeartbeat(peerID string) {
+	defer s.haWg.Done()
+
+	ticker := time.NewTicker(s.haConfig.HeartbeatInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			ctx, cancel := context.WithTimeout(s.haCtx, 5*time.Second)
+			err := s.redisClient.HSet(ctx, s.haConfig.RegistryKey, peerID, s.instanceID).Err()
+			if err == nil {
+				s.redisClient.Expire(ctx, s.haConfig.RegistryKey, s.haConfig.PeerTTL)
+			}
+			cancel()
+		case <-s.haCtx.Done():
+			return
+		}
+	}
+}
+
+func (s *Server) deregisterPeerFromRedis(peerID string) {
+	if s.redisClient == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := s.redisClient.HDel(ctx, s.haConfig.RegistryKey, peerID).Err(); err != nil {
+		log.Warnf("failed to deregister peer %s from redis: %v", peerID, err)
+	}
+}
+
+type signalEnvelope struct {
+	FromInstance string                  `json:"from_instance"`
+	ToPeer       string                  `json:"to_peer"`
+	Message      *proto.EncryptedMessage `json:"message"`
+}
+
+func (s *Server) haMessageListener(pubsub *redis.PubSub) {
+	defer s.haWg.Done()
+
+	ch := pubsub.Channel()
+	for msg := range ch {
+		if msg == nil {
+			continue
+		}
+
+		var envelope signalEnvelope
+		if err := json.Unmarshal([]byte(msg.Payload), &envelope); err != nil {
+			log.Warnf("failed to unmarshal HA message: %v", err)
+			continue
+		}
+
+		s.forwardMessageToPeer(s.haCtx, envelope.Message)
+	}
+}
+
+// Shutdown gracefully shuts down the HA components.
+func (s *Server) Shutdown(ctx context.Context) error {
+	if s.haCancel != nil {
+		s.haCancel()
+	}
+
+	// Wait for goroutines with timeout
+	done := make(chan struct{})
+	go func() {
+		s.haWg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+		log.Warn("HA shutdown timed out")
+	}
+
+	if s.redisClient != nil {
+		_ = s.redisClient.Close()
+	}
+
+	return nil
 }
 
 func (s *Server) forwardMessageToPeer(ctx context.Context, msg *proto.EncryptedMessage) {

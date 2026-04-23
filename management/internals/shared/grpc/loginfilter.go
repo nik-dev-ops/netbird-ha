@@ -1,11 +1,14 @@
 package grpc
 
 import (
+	"context"
+	"encoding/json"
 	"hash/fnv"
 	"math"
 	"sync"
 	"time"
 
+	"github.com/netbirdio/netbird/shared/distributed"
 	nbpeer "github.com/netbirdio/netbird/management/server/peer"
 )
 
@@ -36,6 +39,8 @@ type loginFilter struct {
 	mu     sync.RWMutex
 	cfg    *lfConfig
 	logged map[string]*peerState
+	redis  *distributed.Client
+	key    string
 }
 
 type peerState struct {
@@ -61,12 +66,36 @@ func newLoginFilterWithCfg(cfg *lfConfig) *loginFilter {
 	}
 }
 
+func newLoginFilterWithRedis(redis *distributed.Client, key string) *loginFilter {
+	return &loginFilter{
+		logged: make(map[string]*peerState),
+		cfg:    initCfg(),
+		redis:  redis,
+		key:    key,
+	}
+}
+
 func (l *loginFilter) allowLogin(wgPubKey string, metaHash uint64) bool {
 	l.mu.RLock()
-	defer func() {
-		l.mu.RUnlock()
-	}()
 	state, ok := l.logged[wgPubKey]
+	l.mu.RUnlock()
+
+	if !ok && l.redis != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		data, err := l.redis.HGet(ctx, l.key, wgPubKey).Result()
+		if err == nil && data != "" {
+			var redisState peerState
+			if json.Unmarshal([]byte(data), &redisState) == nil {
+				state = &redisState
+				ok = true
+				l.mu.Lock()
+				l.logged[wgPubKey] = state
+				l.mu.Unlock()
+			}
+		}
+	}
+
 	if !ok {
 		return true
 	}
@@ -91,7 +120,7 @@ func (l *loginFilter) addLogin(wgPubKey string, metaHash uint64) {
 	state, ok := l.logged[wgPubKey]
 
 	if !ok {
-		l.logged[wgPubKey] = &peerState{
+		state = &peerState{
 			currentHash:           metaHash,
 			sessionCounter:        1,
 			sessionStart:          now,
@@ -99,6 +128,8 @@ func (l *loginFilter) addLogin(wgPubKey string, metaHash uint64) {
 			metaChangeWindowStart: now,
 			metaChangeCounter:     1,
 		}
+		l.logged[wgPubKey] = state
+		l.syncToRedis(wgPubKey, state)
 		return
 	}
 
@@ -121,6 +152,7 @@ func (l *loginFilter) addLogin(wgPubKey string, metaHash uint64) {
 		state.sessionCounter = 1
 		state.sessionStart = now
 		state.lastSeen = now
+		l.syncToRedis(wgPubKey, state)
 		return
 	}
 
@@ -137,6 +169,21 @@ func (l *loginFilter) addLogin(wgPubKey string, metaHash uint64) {
 		state.sessionStart = now
 	}
 	state.lastSeen = now
+	l.syncToRedis(wgPubKey, state)
+}
+
+func (l *loginFilter) syncToRedis(wgPubKey string, state *peerState) {
+	if l.redis == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	data, err := json.Marshal(state)
+	if err != nil {
+		return
+	}
+	l.redis.HSet(ctx, l.key, wgPubKey, string(data))
+	l.redis.Expire(ctx, l.key, 2*l.cfg.baseBlockDuration)
 }
 
 func metaHash(meta nbpeer.PeerSystemMeta, pubip string) uint64 {

@@ -1,0 +1,26 @@
+FROM golang:1.25-alpine
+
+RUN apk add --no-cache \
+    git \
+    curl \
+    wget \
+    bash \
+    redis \
+    postgresql-client \
+    ca-certificates
+
+# Install Docker CLI for container stop/start tests
+RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz | tar xz -C /tmp \
+    && cp /tmp/docker/docker /usr/local/bin/docker \
+    && rm -rf /tmp/docker
+
+# Copy entire project so the replace directive works
+WORKDIR /project
+COPY . .
+
+WORKDIR /project/tests/integration
+
+# Download test dependencies
+RUN go mod download
+
+CMD ["sleep", "infinity"]

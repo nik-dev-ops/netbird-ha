@@ -18,6 +18,7 @@ import (
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 
+	"github.com/netbirdio/netbird/shared/distributed"
 	"github.com/netbirdio/netbird/shared/metrics"
 
 	"github.com/netbirdio/netbird/encryption"
@@ -114,7 +115,26 @@ var (
 				}
 			}()
 
-			srv, err := server.NewServer(cmd.Context(), metricsServer.Meter)
+			haConfig := &server.SignalHAConfig{
+			HAConfig: distributed.HAConfig{
+				Enabled:       haEnabled,
+				RedisAddress:  haRedisAddress,
+				RedisPassword: haRedisPassword,
+				RedisDB:       haRedisDB,
+				DialTimeout:   haRedisDialTimeout,
+				ReadTimeout:   haRedisReadTimeout,
+				WriteTimeout:  haRedisWriteTimeout,
+				PoolSize:      haRedisPoolSize,
+				InstanceID:    haInstanceID,
+			},
+			RegistryKey:       haRegistryKey,
+			ChannelPrefix:     haChannelPrefix,
+			PeerTTL:           haPeerTTL,
+			HeartbeatInterval: haHeartbeatInterval,
+			SendTimeout:       haSendTimeout,
+		}
+
+		srv, err := server.NewServer(cmd.Context(), metricsServer.Meter, haConfig)
 			if err != nil {
 				return fmt.Errorf("creating signal server: %v", err)
 			}

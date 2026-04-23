@@ -297,7 +297,7 @@ func (s *serverInstances) createSignalServer(ctx context.Context, cfg *CombinedC
 	}
 
 	var err error
-	s.signalSrv, err = signalServer.NewServer(ctx, s.metricsServer.Meter, "signal_")
+	s.signalSrv, err = signalServer.NewServer(ctx, s.metricsServer.Meter, &cfg.Signal.HA, "signal_")
 	if err != nil {
 		cleanupSTUNListeners(s.stunListeners)
 		return fmt.Errorf("failed to create signal server: %w", err)

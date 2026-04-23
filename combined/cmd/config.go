@@ -16,6 +16,7 @@ import (
 
 	"github.com/netbirdio/netbird/management/server/idp"
 	"github.com/netbirdio/netbird/management/server/types"
+	"github.com/netbirdio/netbird/signal/server"
 	"github.com/netbirdio/netbird/util"
 	"github.com/netbirdio/netbird/util/crypt"
 
@@ -110,8 +111,9 @@ type StunConfig struct {
 
 // SignalConfig contains signal service settings
 type SignalConfig struct {
-	Enabled  bool   `yaml:"enabled"`
-	LogLevel string `yaml:"logLevel"`
+	Enabled  bool                  `yaml:"enabled"`
+	LogLevel string                `yaml:"logLevel"`
+	HA       server.SignalHAConfig `yaml:"ha"`
 }
 
 // ManagementConfig contains management service settings
