@@ -297,7 +297,7 @@ func (e *EphemeralManager) newDeadLine() time.Time {
 
 func (e *EphemeralManager) redisZAdd(ctx context.Context, peerID, accountID string, deadline time.Time) {
 	member := peerID + ":" + accountID
-	err := e.redisClient.ZAdd(ctx, e.ephemeralKey, redis.Z{Score: float64(deadline.Unix()), Member: member}).Err()
+	err := e.redisClient.ZAdd(ctx, e.ephemeralKey, redis.Z{Score: float64(deadline.UnixMilli()), Member: member}).Err()
 	if err != nil {
 		log.WithContext(ctx).Errorf("failed to ZADD ephemeral peer %s: %v", member, err)
 	}
@@ -327,7 +327,7 @@ func (e *EphemeralManager) redisPollLoop(ctx context.Context) {
 }
 
 func (e *EphemeralManager) redisCleanup(ctx context.Context) {
-	now := timeNow().Unix()
+	now := timeNow().UnixMilli()
 	members, err := e.redisClient.ZRangeByScore(ctx, e.ephemeralKey, &redis.ZRangeBy{
 		Min: "0",
 		Max: fmt.Sprintf("%d", now),
@@ -355,10 +355,13 @@ func (e *EphemeralManager) redisCleanup(ctx context.Context) {
 	}
 	e.peersLock.Unlock()
 
+	pipe := e.redisClient.Pipeline()
 	for _, member := range members {
-		if err := e.redisClient.ZRem(ctx, e.ephemeralKey, member).Err(); err != nil {
-			log.WithContext(ctx).Errorf("failed to ZREM ephemeral peer %s: %v", member, err)
-		}
+		pipe.ZRem(ctx, e.ephemeralKey, member)
+	}
+	_, err = pipe.Exec(ctx)
+	if err != nil {
+		log.WithContext(ctx).Errorf("failed to ZREM ephemeral peers: %v", err)
 	}
 
 	for accountID, peerIDs := range peerIDsPerAccount {

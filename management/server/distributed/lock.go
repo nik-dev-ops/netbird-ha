@@ -11,6 +11,7 @@ import (
 	"time"
 
 	ha "github.com/netbirdio/netbird/shared/distributed"
+	log "github.com/sirupsen/logrus"
 )
 
 // Lock provides distributed mutual exclusion.
@@ -32,6 +33,16 @@ func NewRedisLock(client *ha.Client) *RedisLock {
 	}
 }
 
+// Lua script for atomic check-and-delete unlock.
+// Returns 1 if the lock was deleted, 0 if it wasn't held by this instance.
+const unlockScript = `
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+    return redis.call("DEL", KEYS[1])
+else
+    return 0
+end
+`
+
 // Acquire attempts to acquire a distributed lock for the given resource.
 // On success it returns a release function that MUST be called to free the lock.
 // A background goroutine extends the lock TTL every ttl/3 until released.
@@ -47,7 +58,8 @@ func (l *RedisLock) Acquire(ctx context.Context, resource string, ttl time.Durat
 		return nil, fmt.Errorf("lock already held: %s", resource)
 	}
 
-	stopHeartbeat := make(chan struct{})
+	// Use context-based cancellation instead of channel-based stop to avoid goroutine leak.
+	heartbeatCtx, cancelHeartbeat := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	wg.Add(1)
 
@@ -66,7 +78,7 @@ func (l *RedisLock) Acquire(ctx context.Context, resource string, ttl time.Durat
 					// Heartbeat failed; lock will eventually expire.
 					return
 				}
-			case <-stopHeartbeat:
+			case <-heartbeatCtx.Done():
 				return
 			}
 		}
@@ -83,15 +95,21 @@ func (l *RedisLock) Acquire(ctx context.Context, resource string, ttl time.Durat
 		}
 		released = true
 
-		close(stopHeartbeat)
+		cancelHeartbeat()
 		wg.Wait()
 
 		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		val, err := l.client.Get(bgCtx, key).Result()
-		if err == nil && val == value {
-			l.client.Del(bgCtx, key)
+		// Use Lua script for atomic check-and-delete to prevent race condition
+		// where another instance acquires the lock between GET and DEL.
+		result, err := l.client.Eval(bgCtx, unlockScript, []string{key}, value).Int()
+		if err != nil {
+			log.Errorf("failed to release distributed lock %s: %v", resource, err)
+			return
+		}
+		if result == 0 {
+			log.Warnf("distributed lock %s was not held by this instance", resource)
 		}
 	}
 

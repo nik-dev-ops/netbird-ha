@@ -7,6 +7,7 @@ package distributed
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -36,6 +37,7 @@ func NewClient(cfg HAConfig) (*Client, error) {
 		ReadTimeout:  cfg.ReadTimeout,
 		WriteTimeout: cfg.WriteTimeout,
 		PoolSize:     cfg.PoolSize,
+		TLSConfig:    cfg.TLSConfig,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.DialTimeout)
@@ -48,9 +50,16 @@ func NewClient(cfg HAConfig) (*Client, error) {
 	return &Client{Client: rdb, config: cfg}, nil
 }
 
-// HealthCheck returns nil if Redis is reachable.
+// HealthCheck validates Redis connectivity by writing and reading back data.
 func (c *Client) HealthCheck(ctx context.Context) error {
-	return c.Ping(ctx).Err()
+	return c.Echo(ctx, "health").Err()
+}
+
+// IsConnected provides a quick connectivity check with a 2-second timeout.
+func (c *Client) IsConnected() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return c.Echo(ctx, "ping").Err() == nil
 }
 
 // Close gracefully shuts down the client.

@@ -6,6 +6,7 @@ package distributed
 
 import (
 	"crypto/rand"
+	"crypto/tls"
 	"fmt"
 	"os"
 	"time"
@@ -23,6 +24,7 @@ type HAConfig struct {
 	ReadTimeout       time.Duration `yaml:"read_timeout" env:"NB_HA_REDIS_READ_TIMEOUT"`
 	WriteTimeout      time.Duration `yaml:"write_timeout" env:"NB_HA_REDIS_WRITE_TIMEOUT"`
 	PoolSize          int           `yaml:"pool_size" env:"NB_HA_REDIS_POOL_SIZE"`
+	TLSConfig         *tls.Config   `yaml:"-" env:"-"`
 	InstanceID        string        `yaml:"instance_id" env:"NB_HA_INSTANCE_ID"`
 }
 
@@ -42,19 +44,13 @@ func DefaultHAConfig() HAConfig {
 }
 
 // DetectInstanceID returns a unique instance identifier.
-// Priority: config value > NB_HA_INSTANCE_ID env var > HOSTNAME env var > os.Hostname() > generated UUID.
+// Priority: config value > NB_HA_INSTANCE_ID env var > generated UUID.
 func DetectInstanceID(cfgValue string) string {
 	if cfgValue != "" {
 		return cfgValue
 	}
 	if v := os.Getenv("NB_HA_INSTANCE_ID"); v != "" {
 		return v
-	}
-	if v := os.Getenv("HOSTNAME"); v != "" {
-		return v
-	}
-	if host, err := os.Hostname(); err == nil && host != "" {
-		return host
 	}
 	return generateUUID()
 }

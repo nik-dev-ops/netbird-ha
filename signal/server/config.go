@@ -29,8 +29,8 @@ func DefaultSignalHAConfig() SignalHAConfig {
 		HAConfig:          distributed.DefaultHAConfig(),
 		RegistryKey:       "nb:signal:registry",
 		ChannelPrefix:     "nb:signal:instance:",
-		PeerTTL:           60 * time.Second,
-		HeartbeatInterval: 30 * time.Second,
+		PeerTTL:           30 * time.Second,
+		HeartbeatInterval: 10 * time.Second,
 		SendTimeout:       10 * time.Second,
 	}
 }
@@ -51,10 +51,10 @@ func (c *SignalHAConfig) Validate() error {
 		c.ChannelPrefix = "nb:signal:instance:"
 	}
 	if c.PeerTTL <= 0 {
-		c.PeerTTL = 60 * time.Second
+		c.PeerTTL = 30 * time.Second
 	}
 	if c.HeartbeatInterval <= 0 {
-		c.HeartbeatInterval = 30 * time.Second
+		c.HeartbeatInterval = 10 * time.Second
 	}
 	if c.SendTimeout <= 0 {
 		c.SendTimeout = 10 * time.Second

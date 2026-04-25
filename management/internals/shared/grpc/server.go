@@ -276,7 +276,8 @@ func (s *Server) Sync(req *proto.EncryptedMessage, srv proto.ManagementService_S
 	}
 
 	metahashed := metaHash(peerMeta, sRealIP)
-	if userID == "" && !s.loginFilter.allowLogin(peerKey.String(), metahashed) {
+	metahash := metaHash(peerMeta, realIP.String())
+	if userID == "" && !s.loginFilter.CheckAndAddLogin(ctx, peerKey.String(), metahash) {
 		if s.appMetrics != nil {
 			s.appMetrics.GRPCMetrics().CountSyncRequestBlocked()
 		}
@@ -326,9 +327,6 @@ func (s *Server) Sync(req *proto.EncryptedMessage, srv proto.ManagementService_S
 	if syncReq.GetMeta() == nil {
 		log.WithContext(ctx).Tracef("peer system meta has to be provided on sync. Peer %s, remote addr %s", peerKey.String(), realIP)
 	}
-
-	metahash := metaHash(peerMeta, realIP.String())
-	s.loginFilter.addLogin(peerKey.String(), metahash)
 
 	peer, netMap, postureChecks, dnsFwdPort, err := s.accountManager.SyncAndMarkPeer(ctx, accountID, peerKey.String(), peerMeta, realIP, syncStart)
 	if err != nil {

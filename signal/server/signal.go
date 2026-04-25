@@ -141,19 +141,16 @@ func (s *Server) initHA(ctx context.Context) error {
 func (s *Server) Send(ctx context.Context, msg *proto.EncryptedMessage) (*proto.EncryptedMessage, error) {
 	log.Tracef("received a new message to send from peer [%s] to peer [%s]", msg.Key, msg.RemoteKey)
 
-	// Fast path: local registry
-	if _, found := s.registry.Get(msg.RemoteKey); found {
-		s.forwardMessageToPeer(ctx, msg)
-		return &proto.EncryptedMessage{}, nil
-	}
-
-	// HA path: check distributed registry
+	// HA path: always check distributed registry when HA is enabled
+	// This avoids stale local entries causing message loss or misrouting
 	if s.redisClient != nil {
 		instanceID, err := s.lookupPeerInstance(ctx, msg.RemoteKey)
 		if err == nil && instanceID != "" {
 			if instanceID == s.instanceID {
-				// Peer should be local but isn't — race condition, drop
-				log.Tracef("peer %s reported as local but not in registry", msg.RemoteKey)
+				// Peer is on this instance - check local registry
+				if _, found := s.registry.Get(msg.RemoteKey); found {
+					s.forwardMessageToPeer(ctx, msg)
+				}
 				return &proto.EncryptedMessage{}, nil
 			}
 
@@ -168,10 +165,17 @@ func (s *Server) Send(ctx context.Context, msg *proto.EncryptedMessage) (*proto.
 			channel := s.haConfig.ChannelPrefix + instanceID
 			if err := s.redisClient.Publish(ctx, channel, payload).Err(); err != nil {
 				log.Warnf("failed to publish message to instance %s: %v", instanceID, err)
-			} else {
-				log.Tracef("forwarded message to peer %s on instance %s", msg.RemoteKey, instanceID)
-				return &proto.EncryptedMessage{}, nil
+				return &proto.EncryptedMessage{}, err
 			}
+			log.Tracef("forwarded message to peer %s on instance %s", msg.RemoteKey, instanceID)
+			return &proto.EncryptedMessage{}, nil
+		}
+		// Peer not in Redis - fall through to dispatcher
+	} else {
+		// Non-HA mode: use local registry fast path
+		if _, found := s.registry.Get(msg.RemoteKey); found {
+			s.forwardMessageToPeer(ctx, msg)
+			return &proto.EncryptedMessage{}, nil
 		}
 	}
 
@@ -312,19 +316,54 @@ type signalEnvelope struct {
 func (s *Server) haMessageListener(pubsub *redis.PubSub) {
 	defer s.haWg.Done()
 
-	ch := pubsub.Channel()
-	for msg := range ch {
-		if msg == nil {
-			continue
+	backoff := time.Second
+	maxBackoff := 30 * time.Second
+
+	for {
+		select {
+		case <-s.haCtx.Done():
+			return
+		default:
 		}
 
-		var envelope signalEnvelope
-		if err := json.Unmarshal([]byte(msg.Payload), &envelope); err != nil {
-			log.Warnf("failed to unmarshal HA message: %v", err)
-			continue
+		ch := pubsub.Channel()
+		for msg := range ch {
+			if msg == nil {
+				continue
+			}
+
+			var envelope signalEnvelope
+			if err := json.Unmarshal([]byte(msg.Payload), &envelope); err != nil {
+				log.Warnf("failed to unmarshal HA message: %v", err)
+				continue
+			}
+
+			s.forwardMessageToPeer(s.haCtx, envelope.Message)
 		}
 
-		s.forwardMessageToPeer(s.haCtx, envelope.Message)
+		// PubSub channel closed, connection lost — attempt reconnect with backoff
+		if s.haCtx.Err() != nil {
+			return
+		}
+
+		log.Warnf("HA pubsub connection lost, reconnecting in %v...", backoff)
+		select {
+		case <-time.After(backoff):
+		case <-s.haCtx.Done():
+			return
+		}
+
+		// Exponential backoff, capped at max
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+
+		channel := s.haConfig.ChannelPrefix + s.instanceID
+		newPubsub := s.redisClient.Subscribe(s.haCtx, channel)
+		if newPubsub != nil {
+			pubsub = newPubsub
+		}
 	}
 }
 
