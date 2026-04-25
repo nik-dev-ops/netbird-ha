@@ -62,9 +62,9 @@ const (
 type NoopLock struct{ mu sync.Mutex }
 
 // Acquire locks the local mutex and returns an unlock function.
-func (l *NoopLock) Acquire(ctx context.Context, resource string, ttl time.Duration) (func(), error) {
+func (l *NoopLock) Acquire(ctx context.Context, resource string, ttl time.Duration) (func() error, error) {
 	l.mu.Lock()
-	return l.mu.Unlock, nil
+	return func() error { l.mu.Unlock(); return nil }, nil
 }
 
 // Server an instance of a Management gRPC API server
@@ -605,7 +605,9 @@ func (s *Server) acquirePeerLockByUID(ctx context.Context, uniqueID string) (unl
 	start = time.Now()
 
 	unlock = func() {
-		release()
+		if err := release(); err != nil {
+			log.WithContext(ctx).Warnf("failed to release peer lock for %s: %v", uniqueID, err)
+		}
 		log.WithContext(ctx).Tracef("released peer lock for ID %s in %v", uniqueID, time.Since(start))
 	}
 

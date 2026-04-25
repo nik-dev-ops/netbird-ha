@@ -20,10 +20,9 @@ import (
 )
 
 const (
-	// cleanupWindow is the time window to wait after nearest peer deadline to start the cleanup procedure.
-	cleanupWindow = 1 * time.Minute
-	// redisPollInterval is the interval for polling Redis ZSET for expired ephemeral peers in HA mode.
+	cleanupWindow    = 1 * time.Minute
 	redisPollInterval = 1 * time.Minute
+	memberSeparator  = "|"
 )
 
 var (
@@ -296,7 +295,7 @@ func (e *EphemeralManager) newDeadLine() time.Time {
 }
 
 func (e *EphemeralManager) redisZAdd(ctx context.Context, peerID, accountID string, deadline time.Time) {
-	member := peerID + ":" + accountID
+	member := peerID + memberSeparator + accountID
 	err := e.redisClient.ZAdd(ctx, e.ephemeralKey, redis.Z{Score: float64(deadline.UnixMilli()), Member: member}).Err()
 	if err != nil {
 		log.WithContext(ctx).Errorf("failed to ZADD ephemeral peer %s: %v", member, err)
@@ -304,7 +303,7 @@ func (e *EphemeralManager) redisZAdd(ctx context.Context, peerID, accountID stri
 }
 
 func (e *EphemeralManager) redisZRem(ctx context.Context, peerID, accountID string) {
-	member := peerID + ":" + accountID
+	member := peerID + memberSeparator + accountID
 	err := e.redisClient.ZRem(ctx, e.ephemeralKey, member).Err()
 	if err != nil {
 		log.WithContext(ctx).Errorf("failed to ZREM ephemeral peer %s: %v", member, err)
@@ -327,47 +326,79 @@ func (e *EphemeralManager) redisPollLoop(ctx context.Context) {
 }
 
 func (e *EphemeralManager) redisCleanup(ctx context.Context) {
-	now := timeNow().UnixMilli()
-	members, err := e.redisClient.ZRangeByScore(ctx, e.ephemeralKey, &redis.ZRangeBy{
-		Min: "0",
-		Max: fmt.Sprintf("%d", now),
-	}).Result()
-	if err != nil {
-		log.WithContext(ctx).Errorf("failed to ZRANGEBYSCORE ephemeral peers: %v", err)
-		return
-	}
+	const maxRetries = 3
 
-	if len(members) == 0 {
-		return
-	}
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		now := timeNow().UnixMilli()
 
-	e.peersLock.Lock()
-	peerIDsPerAccount := make(map[string][]string)
-	for _, member := range members {
-		parts := strings.SplitN(member, ":", 2)
-		if len(parts) != 2 {
-			log.WithContext(ctx).Warnf("invalid ephemeral peer member format: %s", member)
-			continue
+		err := e.redisClient.Watch(ctx, func(tx *redis.Tx) error {
+			members, err := tx.ZRangeByScore(ctx, e.ephemeralKey, &redis.ZRangeBy{
+				Min: "0",
+				Max: fmt.Sprintf("%d", now),
+			}).Result()
+			if err != nil {
+				return err
+			}
+
+			if len(members) == 0 {
+				return nil
+			}
+
+			peerIDsPerAccount := make(map[string][]string)
+			validMembers := make([]string, 0, len(members))
+			for _, member := range members {
+				parts := strings.SplitN(member, memberSeparator, 2)
+				if len(parts) != 2 {
+					log.WithContext(ctx).Warnf("invalid ephemeral peer member format: %s", member)
+					continue
+				}
+				peerID, accountID := parts[0], parts[1]
+				peerIDsPerAccount[accountID] = append(peerIDsPerAccount[accountID], peerID)
+				validMembers = append(validMembers, member)
+			}
+
+			if len(validMembers) == 0 {
+				return nil
+			}
+
+			_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+				for _, member := range validMembers {
+					pipe.ZRem(ctx, e.ephemeralKey, member)
+				}
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+
+			e.peersLock.Lock()
+			for _, member := range validMembers {
+				parts := strings.SplitN(member, memberSeparator, 2)
+				if len(parts) == 2 {
+					e.removePeer(parts[0])
+				}
+			}
+			e.peersLock.Unlock()
+
+			for accountID, peerIDs := range peerIDsPerAccount {
+				log.WithContext(ctx).Tracef("cleanup: deleting %d ephemeral peers for account %s", len(peerIDs), accountID)
+				if err := e.peersManager.DeletePeers(ctx, accountID, peerIDs, activity.SystemInitiator, true); err != nil {
+					log.WithContext(ctx).Errorf("failed to delete ephemeral peers: %s", err)
+				}
+			}
+
+			return nil
+		}, e.ephemeralKey)
+
+		if err == nil {
+			return
 		}
-		peerID, accountID := parts[0], parts[1]
-		e.removePeer(peerID)
-		peerIDsPerAccount[accountID] = append(peerIDsPerAccount[accountID], peerID)
-	}
-	e.peersLock.Unlock()
 
-	pipe := e.redisClient.Pipeline()
-	for _, member := range members {
-		pipe.ZRem(ctx, e.ephemeralKey, member)
-	}
-	_, err = pipe.Exec(ctx)
-	if err != nil {
-		log.WithContext(ctx).Errorf("failed to ZREM ephemeral peers: %v", err)
-	}
-
-	for accountID, peerIDs := range peerIDsPerAccount {
-		log.WithContext(ctx).Tracef("cleanup: deleting %d ephemeral peers for account %s", len(peerIDs), accountID)
-		if err := e.peersManager.DeletePeers(ctx, accountID, peerIDs, activity.SystemInitiator, true); err != nil {
-			log.WithContext(ctx).Errorf("failed to delete ephemeral peers: %s", err)
+		if attempt == maxRetries-1 {
+			log.WithContext(ctx).Errorf("failed to cleanup ephemeral peers after %d attempts: %v", maxRetries, err)
+			return
 		}
+
+		log.WithContext(ctx).Debugf("ephemeral peers cleanup watch triggered, retrying (attempt %d/%d)", attempt+1, maxRetries)
 	}
 }

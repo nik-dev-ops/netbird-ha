@@ -694,24 +694,38 @@ func logEnvVars() {
 	log.Info("=== End Environment Variables ===")
 }
 
-// maskDSNPassword masks the password in a DSN string.
-// Handles both key=value format ("password=secret") and URI format ("user:secret@host").
 func maskDSNPassword(dsn string) string {
-	// Key=value format: "host=localhost user=nb password=secret dbname=nb"
-	if strings.Contains(dsn, "password=") {
+	if strings.Contains(dsn, "://") {
+		atIdx := strings.Index(dsn, "@")
+		if atIdx != -1 {
+			prefix := dsn[:atIdx]
+			colonIdx := strings.LastIndex(prefix, ":")
+			if colonIdx != -1 {
+				return prefix[:colonIdx+1] + "****" + dsn[atIdx:]
+			}
+		}
+	}
+
+	if strings.Contains(dsn, "password=") || strings.Contains(dsn, "pass=") {
 		parts := strings.Fields(dsn)
-		for i, p := range parts {
-			if strings.HasPrefix(p, "password=") {
-				parts[i] = "password=****"
+		for i, part := range parts {
+			for _, prefix := range []string{"password=", "pass="} {
+				if strings.HasPrefix(part, prefix) {
+					eqIdx := strings.Index(part, "=")
+					if eqIdx != -1 {
+						parts[i] = part[:eqIdx+1] + "****"
+					}
+				}
 			}
 		}
 		return strings.Join(parts, " ")
 	}
 
-	// URI format: "user:password@host..."
-	if atIdx := strings.Index(dsn, "@"); atIdx != -1 {
+	atIdx := strings.Index(dsn, "@")
+	if atIdx != -1 {
 		prefix := dsn[:atIdx]
-		if colonIdx := strings.Index(prefix, ":"); colonIdx != -1 {
+		colonIdx := strings.Index(prefix, ":")
+		if colonIdx != -1 {
 			return prefix[:colonIdx+1] + "****" + dsn[atIdx:]
 		}
 	}

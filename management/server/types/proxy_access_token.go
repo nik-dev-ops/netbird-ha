@@ -1,10 +1,10 @@
 package types
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
-	"hash/crc32"
 	"strings"
 	"time"
 
@@ -16,14 +16,11 @@ import (
 )
 
 const (
-	// ProxyTokenPrefix is the globally used prefix for proxy access tokens
-	ProxyTokenPrefix = "nbx_"
-	// ProxyTokenSecretLength is the number of characters used for the secret
-	ProxyTokenSecretLength = 30
-	// ProxyTokenChecksumLength is the number of characters used for the encoded checksum
-	ProxyTokenChecksumLength = 6
-	// ProxyTokenLength is the total number of characters used for the token
-	ProxyTokenLength = 40
+	ProxyTokenPrefix            = "nbx_"
+	ProxyTokenSecretLength      = 30
+	ProxyTokenChecksumLength    = 6
+	ProxyTokenLength            = 40
+	ProxyTokenChecksumSecret    = "netbird-proxy-token-checksum-secret-v1"
 )
 
 // HashedProxyToken is a SHA-256 hash of a plain proxy token, base64-encoded.
@@ -100,8 +97,14 @@ func generateProxyToken() (HashedProxyToken, PlainProxyToken, error) {
 		return "", "", err
 	}
 
-	checksum := crc32.ChecksumIEEE([]byte(secret))
-	encodedChecksum := base62.Encode(checksum)
+	mac := hmac.New(sha256.New, []byte(ProxyTokenChecksumSecret))
+	mac.Write([]byte(secret))
+	sum := mac.Sum(nil)
+	var cksum uint32
+	for i := 0; i < 6; i++ {
+		cksum = cksum*31 + uint32(sum[i])
+	}
+	encodedChecksum := base62.Encode(cksum)
 	paddedChecksum := fmt.Sprintf("%06s", encodedChecksum)
 	plainToken := PlainProxyToken(ProxyTokenPrefix + secret + paddedChecksum)
 	return plainToken.Hash(), plainToken, nil
@@ -113,7 +116,6 @@ func (t PlainProxyToken) Hash() HashedProxyToken {
 	return HashedProxyToken(base64.StdEncoding.EncodeToString(h[:]))
 }
 
-// Validate checks the format of a proxy token without checking the database.
 func (t PlainProxyToken) Validate() error {
 	if !strings.HasPrefix(string(t), ProxyTokenPrefix) {
 		return fmt.Errorf("invalid token prefix")
@@ -126,8 +128,15 @@ func (t PlainProxyToken) Validate() error {
 	secret := t[len(ProxyTokenPrefix) : len(t)-ProxyTokenChecksumLength]
 	checksumStr := t[len(t)-ProxyTokenChecksumLength:]
 
-	expectedChecksum := crc32.ChecksumIEEE([]byte(secret))
-	expectedChecksumStr := fmt.Sprintf("%06s", base62.Encode(expectedChecksum))
+	mac := hmac.New(sha256.New, []byte(ProxyTokenChecksumSecret))
+	mac.Write([]byte(secret))
+	sum := mac.Sum(nil)
+	var cksum uint32
+	for i := 0; i < 6; i++ {
+		cksum = cksum*31 + uint32(sum[i])
+	}
+	expectedChecksum := base62.Encode(cksum)
+	expectedChecksumStr := fmt.Sprintf("%06s", expectedChecksum)
 
 	if string(checksumStr) != expectedChecksumStr {
 		return fmt.Errorf("invalid token checksum")

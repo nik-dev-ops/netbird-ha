@@ -20,6 +20,7 @@ type SignalHAConfig struct {
 	PeerTTL           time.Duration `yaml:"peer_ttl" env:"NB_SIGNAL_PEER_TTL"`
 	HeartbeatInterval time.Duration `yaml:"heartbeat_interval" env:"NB_SIGNAL_HEARTBEAT_INTERVAL"`
 	SendTimeout       time.Duration `yaml:"send_timeout" env:"NB_SIGNAL_SEND_TIMEOUT"`
+	Secret            string        `yaml:"secret" env:"NB_SIGNAL_SECRET"`
 }
 
 // DefaultSignalHAConfig returns signal-specific defaults.

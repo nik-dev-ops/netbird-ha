@@ -44,7 +44,7 @@ func (s *LoginFilterTestSuite) TestFirstLoginIsAlwaysAllowed() {
 
 	s.filter.addLogin(pubKey, meta)
 	s.Require().Contains(s.filter.logged, pubKey)
-	s.Equal(1, s.filter.logged[pubKey].sessionCounter)
+	s.Equal(uint64(1), s.filter.logged[pubKey].sessionCounter)
 }
 
 func (s *LoginFilterTestSuite) TestFlappingSameHashTriggersBan() {

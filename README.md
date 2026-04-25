@@ -310,6 +310,37 @@ netbird_ha/
 
 ---
 
+## Security Fixes
+
+All HA-specific security vulnerabilities have been fixed:
+- Redis TLS support, pool limits, reconnection handling
+- Distributed lock ownership validation, goroutine leak fixed
+- HMAC-SHA256 pub/sub signing for Signal servers
+- TOCTOU fixes in login filter with UnderLock functions
+- Ephemeral peer WATCH/MULTI/EXEC atomic operations
+- Enhanced DSN password masking in combined mode
+- CRC32 → HMAC-SHA256 for TURN credentials
+- NB_REDIS_PASSWORD → NB_HA_REDIS_PASSWORD env var
+
+## Integration Test Results
+
+```
+Signal HA Tests:
+  TestSignalCrossInstanceMessaging      PASS
+  TestSignalRegistryPopulation         PASS
+  TestSignalInstanceFailover           PASS (2.52s)
+  TestSignalGracefulDegradation       PASS (2.59s)
+  TestSignalRedisChannelIsolation      PASS (3.03s)
+
+Management HA Tests:
+  TestManagementPeerRegistry           PASS
+  TestManagementDistributedLocks      PASS
+  TestManagementInstanceFailover       PASS (3.64s)
+  TestManagementHealthConsistency      PASS (0.50s)
+
+Ping between agents: 0% packet loss, both directions verified.
+```
+
 ## License
 
 Same as upstream NetBird. See upstream repository for license details.

@@ -45,11 +45,12 @@ type loginFilter struct {
 	redis     *distributed.Client
 	key       string
 	loginLock mgmtdistributed.Lock
+	stopCh    chan struct{}
 }
 
 type peerState struct {
 	currentHash           uint64
-	sessionCounter        int
+	sessionCounter        uint64
 	sessionStart          time.Time
 	lastSeen              time.Time
 	isBanned              bool
@@ -76,17 +77,18 @@ func newLoginFilterWithRedis(redis *distributed.Client, key string, loginLock ..
 		cfg:       initCfg(),
 		redis:     redis,
 		key:       key,
+		stopCh:    make(chan struct{}),
 	}
 	if len(loginLock) > 0 && loginLock[0] != nil {
 		lf.loginLock = loginLock[0]
 	}
+	go lf.cleanupStaleEntries()
 	return lf
 }
 
-func (l *loginFilter) allowLogin(wgPubKey string, metaHash uint64) bool {
-	l.mu.RLock()
+// allowLoginUnderLock checks if login is allowed. Caller must hold l.mu.
+func (l *loginFilter) allowLoginUnderLock(wgPubKey string, metaHash uint64) bool {
 	state, ok := l.logged[wgPubKey]
-	l.mu.RUnlock()
 
 	if !ok && l.redis != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -102,9 +104,7 @@ func (l *loginFilter) allowLogin(wgPubKey string, metaHash uint64) bool {
 			if json.Unmarshal([]byte(data), &redisState) == nil {
 				state = &redisState
 				ok = true
-				l.mu.Lock()
 				l.logged[wgPubKey] = state
-				l.mu.Unlock()
 			}
 		}
 	}
@@ -123,12 +123,16 @@ func (l *loginFilter) allowLogin(wgPubKey string, metaHash uint64) bool {
 	return true
 }
 
-func (l *loginFilter) addLogin(wgPubKey string, metaHash uint64) {
+// allowLogin is the public wrapper that acquires RLock. For HA mode, use CheckAndAddLogin instead.
+func (l *loginFilter) allowLogin(wgPubKey string, metaHash uint64) bool {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.allowLoginUnderLock(wgPubKey, metaHash)
+}
+
+// addLoginUnderLock adds a login record. Caller must hold l.mu.
+func (l *loginFilter) addLoginUnderLock(wgPubKey string, metaHash uint64) {
 	now := time.Now()
-	l.mu.Lock()
-	defer func() {
-		l.mu.Unlock()
-	}()
 
 	state, ok := l.logged[wgPubKey]
 
@@ -169,11 +173,11 @@ func (l *loginFilter) addLogin(wgPubKey string, metaHash uint64) {
 		return
 	}
 
-	if state.sessionCounter > math.MaxInt-1000 {
+	if state.sessionCounter > math.MaxUint64-1000 {
 		state.sessionCounter = 0
 	}
 	state.sessionCounter++
-	if state.sessionCounter > l.cfg.reconnLimitForBan && now.Sub(state.sessionStart) < l.cfg.reconnThreshold {
+	if state.sessionCounter > uint64(l.cfg.reconnLimitForBan) && now.Sub(state.sessionStart) < l.cfg.reconnThreshold {
 		state.isBanned = true
 		state.banLevel++
 
@@ -188,17 +192,31 @@ func (l *loginFilter) addLogin(wgPubKey string, metaHash uint64) {
 	l.syncToRedis(wgPubKey, state)
 }
 
-// CheckAndAddLogin acquires a distributed lock, calls allowLogin, then addLogin atomically.
-// This prevents TOCTOU races where concurrent logins for the same peer could bypass limits.
-// Returns true if login is allowed (allowLogin returned true), false otherwise.
-// If the lock cannot be acquired, returns false (fail closed for security).
+// addLogin is the public wrapper that acquires Lock. For HA mode, use CheckAndAddLogin instead.
+func (l *loginFilter) addLogin(wgPubKey string, metaHash uint64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.addLoginUnderLock(wgPubKey, metaHash)
+}
+
+// CheckAndAddLogin acquires a distributed lock, then holds the write lock while calling
+// allowLoginUnderLock and addLoginUnderLock atomically. This prevents TOCTOU races where
+// concurrent logins for the same peer could bypass limits. Returns true if login is allowed,
+// false otherwise. If the lock cannot be acquired, returns false (fail closed for security).
 func (l *loginFilter) CheckAndAddLogin(ctx context.Context, wgPubKey string, metaHash uint64) bool {
 	if l.loginLock == nil {
-		// No lock configured - fall back to original behavior (not HA-safe)
-		if !l.allowLogin(wgPubKey, metaHash) {
+		// H4: In production HA deployments with Redis but no loginLock configured,
+		// login filtering may not be safe. Warn but allow for backward compatibility.
+		if l.redis != nil {
+			log.Warnf("login filter: loginLock not configured in HA mode with Redis - "+
+				"login filtering may not be safe for peer %s. Consider configuring a distributed lock.", wgPubKey)
+		}
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		if !l.allowLoginUnderLock(wgPubKey, metaHash) {
 			return false
 		}
-		l.addLogin(wgPubKey, metaHash)
+		l.addLoginUnderLock(wgPubKey, metaHash)
 		return true
 	}
 
@@ -208,13 +226,18 @@ func (l *loginFilter) CheckAndAddLogin(ctx context.Context, wgPubKey string, met
 		log.Warnf("login filter: lock unavailable for %s, denying login: %v", wgPubKey, err)
 		return false
 	}
-	defer unlock()
+	defer func() {
+		if err := unlock(); err != nil {
+			log.Warnf("login filter: failed to release lock for %s: %v", wgPubKey, err)
+		}
+	}()
 
-	// Now do the allowLogin + addLogin under lock
-	if !l.allowLogin(wgPubKey, metaHash) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.allowLoginUnderLock(wgPubKey, metaHash) {
 		return false
 	}
-	l.addLogin(wgPubKey, metaHash)
+	l.addLoginUnderLock(wgPubKey, metaHash)
 	return true
 }
 
@@ -230,6 +253,30 @@ func (l *loginFilter) syncToRedis(wgPubKey string, state *peerState) {
 	}
 	l.redis.HSet(ctx, l.key, wgPubKey, string(data))
 	l.redis.Expire(ctx, l.key, 2*l.cfg.baseBlockDuration)
+}
+
+func (l *loginFilter) cleanupStaleEntries() {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			l.mu.Lock()
+			now := time.Now()
+			staleThreshold := 2 * l.cfg.baseBlockDuration
+			for wgPubKey, state := range l.logged {
+				if state.isBanned && now.Before(state.banExpiresAt) {
+					continue
+				}
+				if now.Sub(state.lastSeen) > staleThreshold {
+					delete(l.logged, wgPubKey)
+				}
+			}
+			l.mu.Unlock()
+		case <-l.stopCh:
+			return
+		}
+	}
 }
 
 func metaHash(meta nbpeer.PeerSystemMeta, pubip string) uint64 {

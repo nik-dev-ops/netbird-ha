@@ -6,6 +6,7 @@ package distributed
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"time"
 
@@ -29,15 +30,25 @@ func NewClient(cfg HAConfig) (*Client, error) {
 		return nil, fmt.Errorf("invalid HA config: %w", err)
 	}
 
+	var tlsConfig *tls.Config
+	if cfg.TLSEnabled {
+		tlsConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		}
+	}
+
 	rdb := redis.NewClient(&redis.Options{
-		Addr:         cfg.RedisAddress,
-		Password:     cfg.RedisPassword,
-		DB:           cfg.RedisDB,
-		DialTimeout:  cfg.DialTimeout,
-		ReadTimeout:  cfg.ReadTimeout,
-		WriteTimeout: cfg.WriteTimeout,
-		PoolSize:     cfg.PoolSize,
-		TLSConfig:    cfg.TLSConfig,
+		Addr:           cfg.RedisAddress,
+		Password:       cfg.RedisPassword,
+		DB:             cfg.RedisDB,
+		DialTimeout:    cfg.DialTimeout,
+		ReadTimeout:    cfg.ReadTimeout,
+		WriteTimeout:   cfg.WriteTimeout,
+		PoolSize:       cfg.PoolSize,
+		MaxIdleConns:   cfg.MaxIdleConns,
+		MinIdleConns:   cfg.MinIdleConns,
+		ConnMaxLifetime: cfg.ConnMaxLifetime,
+		TLSConfig:      tlsConfig,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.DialTimeout)

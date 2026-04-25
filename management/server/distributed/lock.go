@@ -16,7 +16,7 @@ import (
 
 // Lock provides distributed mutual exclusion.
 type Lock interface {
-	Acquire(ctx context.Context, resource string, ttl time.Duration) (release func(), err error)
+	Acquire(ctx context.Context, resource string, ttl time.Duration) (release func() error, err error)
 }
 
 // RedisLock implements Lock using Redis SET ... NX EX with a background heartbeat.
@@ -46,8 +46,8 @@ end
 // Acquire attempts to acquire a distributed lock for the given resource.
 // On success it returns a release function that MUST be called to free the lock.
 // A background goroutine extends the lock TTL every ttl/3 until released.
-func (l *RedisLock) Acquire(ctx context.Context, resource string, ttl time.Duration) (release func(), err error) {
-	key := fmt.Sprintf("lock:%s", resource)
+func (l *RedisLock) Acquire(ctx context.Context, resource string, ttl time.Duration) (release func() error, err error) {
+	key := fmt.Sprintf("lock:%s", ha.SanitizeRedisKey(resource))
 	value := l.instanceID
 
 	ok, err := l.client.SetNX(ctx, key, value, ttl).Result()
@@ -71,11 +71,26 @@ func (l *RedisLock) Acquire(ctx context.Context, resource string, ttl time.Durat
 		for {
 			select {
 			case <-ticker.C:
+				// H1: Verify we still own the lock before extending TTL.
+				// If we don't own it (stolen or expired), stop the heartbeat.
 				bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				err := l.client.Expire(bgCtx, key, ttl).Err()
+				currentValue, err := l.client.Get(bgCtx, key).Result()
 				cancel()
+				if err != nil || currentValue != value {
+					// Lock is no longer ours (stolen, expired, or Redis error).
+					// Stop heartbeat to avoid extending someone else's lock.
+					cancelHeartbeat()
+					return
+				}
+
+				// C4: We still own the lock; extend TTL.
+				bgCtx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+				err = l.client.Expire(bgCtx2, key, ttl).Err()
+				cancel2()
 				if err != nil {
 					// Heartbeat failed; lock will eventually expire.
+					// Explicitly cancel to ensure clean goroutine exit.
+					cancelHeartbeat()
 					return
 				}
 			case <-heartbeatCtx.Done():
@@ -87,11 +102,11 @@ func (l *RedisLock) Acquire(ctx context.Context, resource string, ttl time.Durat
 	released := false
 	var releaseMu sync.Mutex
 
-	release = func() {
+	release = func() error {
 		releaseMu.Lock()
 		defer releaseMu.Unlock()
 		if released {
-			return
+			return nil
 		}
 		released = true
 
@@ -101,16 +116,18 @@ func (l *RedisLock) Acquire(ctx context.Context, resource string, ttl time.Durat
 		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		// Use Lua script for atomic check-and-delete to prevent race condition
-		// where another instance acquires the lock between GET and DEL.
+		// H12: Use Lua script for atomic check-and-delete.
+		// The script verifies we still own the lock before DEL to prevent
+		// deleting another owner's lock if our lock expired and was re-acquired.
 		result, err := l.client.Eval(bgCtx, unlockScript, []string{key}, value).Int()
 		if err != nil {
 			log.Errorf("failed to release distributed lock %s: %v", resource, err)
-			return
+			return fmt.Errorf("failed to release distributed lock %s: %w", resource, err)
 		}
 		if result == 0 {
 			log.Warnf("distributed lock %s was not held by this instance", resource)
 		}
+		return nil
 	}
 
 	return release, nil
