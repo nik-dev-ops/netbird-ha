@@ -17,6 +17,7 @@ import (
 	"github.com/netbirdio/netbird/management/internals/shared/grpc"
 	"github.com/netbirdio/netbird/management/server"
 	"github.com/netbirdio/netbird/management/server/auth"
+	mgmtdistributed "github.com/netbirdio/netbird/management/server/distributed"
 	"github.com/netbirdio/netbird/management/server/integrations/integrated_validator"
 	"github.com/netbirdio/netbird/management/server/integrations/port_forwarding"
 	"github.com/netbirdio/netbird/management/server/job"
@@ -105,7 +106,12 @@ func (s *BaseServer) AuthManager() auth.Manager {
 
 func (s *BaseServer) EphemeralManager() ephemeral.Manager {
 	return Create(s, func() ephemeral.Manager {
-		return manager.NewEphemeralManager(s.Store(), s.PeersManager())
+		mgr := manager.NewEphemeralManager(s.Store(), s.PeersManager())
+		if redisClient := s.RedisClient(); redisClient != nil {
+			haCfg := mgmtdistributed.LoadManagementHAConfigFromEnv()
+			mgr.WithRedis(redisClient, haCfg.EphemeralKey)
+		}
+		return mgr
 	})
 }
 

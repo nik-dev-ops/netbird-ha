@@ -1,0 +1,92 @@
+{
+    "Stuns": [
+        {
+            "Proto": "udp",
+            "URI": "stun:turn.nb-ha.local:3478",
+            "Username": "",
+            "Password": ""
+        }
+    ],
+    "TURNConfig": {
+        "TimeBasedCredentials": false,
+        "CredentialsTTL": "12h0m0s",
+        "Secret": "netbird-turn-secret-key-change-in-production",
+        "Turns": [
+            {
+                "Proto": "udp",
+                "URI": "turn:turn.nb-ha.local:3478",
+                "Username": "",
+                "Password": ""
+            }
+        ]
+    },
+    "Relay": {
+        "Addresses": [
+            "rel://relay.nb-ha.local:443"
+        ],
+        "CredentialsTTL": "12h0m0s",
+        "Secret": "netbird-relay-secret-key-change-in-production"
+    },
+    "Signal": {
+        "Proto": "http",
+        "URI": "signal-1.nb-ha.local:10000",
+        "Username": "",
+        "Password": ""
+    },
+    "Datadir": "/var/lib/netbird/",
+    "DataStoreEncryptionKey": "q8mRclArtedgfTq05w6X9d5WiZTXudUeZKf9r8FSf88=",
+    "HttpConfig": {
+        "LetsEncryptDomain": "",
+        "CertFile": "",
+        "CertKey": "",
+        "AuthClientID": "",
+        "AuthAudience": "",
+        "CLIAuthAudience": "",
+        "AuthIssuer": "",
+        "AuthUserIDClaim": "",
+        "AuthKeysLocation": "",
+        "OIDCConfigEndpoint": "",
+        "IdpSignKeyRefreshEnabled": false,
+        "ExtraAuthAudience": "",
+        "AuthCallbackURL": ""
+    },
+    "IdpManagerConfig": null,
+    "DeviceAuthorizationFlow": null,
+    "PKCEAuthorizationFlow": null,
+    "StoreConfig": {
+        "Engine": "postgres"
+    },
+    "ReverseProxy": {
+        "TrustedHTTPProxies": null,
+        "TrustedHTTPProxiesCount": 0,
+        "TrustedPeers": null,
+        "AccessLogRetentionDays": 7,
+        "AccessLogCleanupIntervalHours": 24
+    },
+    "DisableDefaultPolicy": false,
+    "EmbeddedIdP": {
+        "Enabled": true,
+        "Issuer": "http://localhost:8088/oauth2",
+        "LocalAddress": "localhost:33073",
+        "Storage": {
+            "Type": "postgres",
+            "Config": {
+                "DSN": "host=postgres.nb-ha.local port=5432 user=netbird password=netbird dbname=netbird_auth sslmode=disable"
+            }
+        },
+        "DashboardRedirectURIs": [
+            "http://localhost:8088/nb-auth",
+            "http://localhost:8088/nb-silent-auth"
+        ],
+        "CLIRedirectURIs": [
+            "http://localhost:53000/",
+            "http://localhost:54000/"
+        ],
+        "Owner": {
+            "Email": "admin@nb-ha.local",
+            "Hash": "$2b$12$gbZ.1U5vhvGi5nvfkJWnKORM0OjHU6cYQvFrmUJLiYqkJIdvtmltS",
+            "Username": "admin"
+        }
+    },
+    "HA": null
+}

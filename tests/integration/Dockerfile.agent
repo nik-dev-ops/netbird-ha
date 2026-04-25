@@ -1,0 +1,24 @@
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y \
+    wget \
+    curl \
+    iproute2 \
+    iptables \
+    ca-certificates \
+    wireguard-tools \
+    iputils-ping \
+    net-tools \
+    dnsutils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install netbird client binary (built from source)
+COPY netbird /usr/bin/netbird
+RUN chmod +x /usr/bin/netbird
+
+# Setup script for netbird agent
+COPY tests/integration/scripts/agent-setup.sh /usr/local/bin/agent-setup.sh
+RUN chmod +x /usr/local/bin/agent-setup.sh
+
+ENTRYPOINT ["/usr/local/bin/agent-setup.sh"]
+CMD ["sleep", "infinity"]

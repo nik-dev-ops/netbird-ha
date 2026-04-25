@@ -32,4 +32,8 @@ infrastructure_files/setup-*.env
 .DS_Store
 vendor/
 /netbird
+/netbird-mgmt
+/netbird-relay
+/netbird-signal
+/netbird-server
 client/netbird-electron/

@@ -6,18 +6,15 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
-	"sync"
 	"time"
 
 	log "github.com/sirupsen/logrus"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
-	integrationsConfig "github.com/netbirdio/management-integrations/integrations/config"
 	"github.com/netbirdio/netbird/management/internals/controllers/network_map"
 	nbconfig "github.com/netbirdio/netbird/management/internals/server/config"
 	"github.com/netbirdio/netbird/management/server/groups"
 	"github.com/netbirdio/netbird/management/server/settings"
-	"github.com/netbirdio/netbird/shared/management/proto"
 	auth "github.com/netbirdio/netbird/shared/relay/auth/hmac"
 	authv2 "github.com/netbirdio/netbird/shared/relay/auth/hmac/v2"
 )
@@ -35,7 +32,6 @@ type SecretsManager interface {
 
 // TimeBasedAuthSecretsManager generates credentials with TTL and using pre-shared secret known to TURN server
 type TimeBasedAuthSecretsManager struct {
-	mux             sync.Mutex
 	turnCfg         *nbconfig.TURNConfig
 	relayCfg        *nbconfig.Relay
 	turnHmacToken   *auth.TimedHMAC
@@ -43,8 +39,6 @@ type TimeBasedAuthSecretsManager struct {
 	updateManager   network_map.PeersUpdateManager
 	settingsManager settings.Manager
 	groupsManager   groups.Manager
-	turnCancelMap   map[string]chan struct{}
-	relayCancelMap  map[string]chan struct{}
 	wgKey           wgtypes.Key
 }
 
@@ -60,8 +54,6 @@ func NewTimeBasedAuthSecretsManager(updateManager network_map.PeersUpdateManager
 		updateManager:   updateManager,
 		turnCfg:         turnCfg,
 		relayCfg:        relayCfg,
-		turnCancelMap:   make(map[string]chan struct{}),
-		relayCancelMap:  make(map[string]chan struct{}),
 		settingsManager: settingsManager,
 		groupsManager:   groupsManager,
 		wgKey:           key,
@@ -126,166 +118,11 @@ func (m *TimeBasedAuthSecretsManager) GenerateRelayToken() (*Token, error) {
 	}, nil
 }
 
-func (m *TimeBasedAuthSecretsManager) cancelTURN(peerID string) {
-	if channel, ok := m.turnCancelMap[peerID]; ok {
-		close(channel)
-		delete(m.turnCancelMap, peerID)
-	}
-}
-
-func (m *TimeBasedAuthSecretsManager) cancelRelay(peerID string) {
-	if channel, ok := m.relayCancelMap[peerID]; ok {
-		close(channel)
-		delete(m.relayCancelMap, peerID)
-	}
-}
-
-// CancelRefresh cancels scheduled peer credentials refresh
+// CancelRefresh is a no-op in the stateless implementation.
 func (m *TimeBasedAuthSecretsManager) CancelRefresh(peerID string) {
-	m.mux.Lock()
-	defer m.mux.Unlock()
-	m.cancelTURN(peerID)
-	m.cancelRelay(peerID)
 }
 
-// SetupRefresh starts peer credentials refresh
+// SetupRefresh is a no-op in the stateless implementation.
+// Credentials are generated on-demand when peers sync or request them.
 func (m *TimeBasedAuthSecretsManager) SetupRefresh(ctx context.Context, accountID, peerID string) {
-	m.mux.Lock()
-	defer m.mux.Unlock()
-
-	m.cancelTURN(peerID)
-	m.cancelRelay(peerID)
-
-	if m.turnCfg != nil && m.turnCfg.TimeBasedCredentials {
-		turnCancel := make(chan struct{}, 1)
-		m.turnCancelMap[peerID] = turnCancel
-		go m.refreshTURNTokens(ctx, accountID, peerID, turnCancel)
-		log.WithContext(ctx).Debugf("starting TURN refresh for %s", peerID)
-	}
-
-	if m.relayCfg != nil {
-		relayCancel := make(chan struct{}, 1)
-		m.relayCancelMap[peerID] = relayCancel
-		go m.refreshRelayTokens(ctx, accountID, peerID, relayCancel)
-		log.WithContext(ctx).Tracef("starting relay refresh for %s", peerID)
-	}
-}
-
-func (m *TimeBasedAuthSecretsManager) refreshTURNTokens(ctx context.Context, accountID, peerID string, cancel chan struct{}) {
-	ticker := time.NewTicker(m.turnCfg.CredentialsTTL.Duration / 4 * 3)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-cancel:
-			log.WithContext(ctx).Tracef("stopping TURN refresh for %s", peerID)
-			return
-		case <-ticker.C:
-			m.pushNewTURNAndRelayTokens(ctx, accountID, peerID)
-		}
-	}
-}
-
-func (m *TimeBasedAuthSecretsManager) refreshRelayTokens(ctx context.Context, accountID, peerID string, cancel chan struct{}) {
-	ticker := time.NewTicker(m.relayCfg.CredentialsTTL.Duration / 4 * 3)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-cancel:
-			log.WithContext(ctx).Tracef("stopping relay refresh for %s", peerID)
-			return
-		case <-ticker.C:
-			m.pushNewRelayTokens(ctx, accountID, peerID)
-		}
-	}
-}
-
-func (m *TimeBasedAuthSecretsManager) pushNewTURNAndRelayTokens(ctx context.Context, accountID, peerID string) {
-	turnToken, err := m.turnHmacToken.GenerateToken(sha1.New)
-	if err != nil {
-		log.WithContext(ctx).Errorf("failed to generate token for peer '%s': %s", peerID, err)
-		return
-	}
-
-	var turns []*proto.ProtectedHostConfig
-	for _, host := range m.turnCfg.Turns {
-		turn := &proto.ProtectedHostConfig{
-			HostConfig: &proto.HostConfig{
-				Uri:      host.URI,
-				Protocol: ToResponseProto(host.Proto),
-			},
-			User:     turnToken.Payload,
-			Password: turnToken.Signature,
-		}
-		turns = append(turns, turn)
-	}
-
-	update := &proto.SyncResponse{
-		NetbirdConfig: &proto.NetbirdConfig{
-			Turns: turns,
-		},
-	}
-
-	// workaround for the case when client is unable to handle turn and relay updates at different time
-	if m.relayCfg != nil {
-		token, err := m.GenerateRelayToken()
-		if err == nil {
-			update.NetbirdConfig.Relay = &proto.RelayConfig{
-				Urls:           m.relayCfg.Addresses,
-				TokenPayload:   token.Payload,
-				TokenSignature: token.Signature,
-			}
-		}
-	}
-
-	m.extendNetbirdConfig(ctx, peerID, accountID, update)
-
-	log.WithContext(ctx).Debugf("sending new TURN credentials to peer %s", peerID)
-	m.updateManager.SendUpdate(ctx, peerID, &network_map.UpdateMessage{
-		Update:      update,
-		MessageType: network_map.MessageTypeControlConfig,
-	})
-}
-
-func (m *TimeBasedAuthSecretsManager) pushNewRelayTokens(ctx context.Context, accountID, peerID string) {
-	relayToken, err := m.relayHmacToken.GenerateToken()
-	if err != nil {
-		log.Errorf("failed to generate relay token for peer '%s': %s", peerID, err)
-		return
-	}
-
-	update := &proto.SyncResponse{
-		NetbirdConfig: &proto.NetbirdConfig{
-			Relay: &proto.RelayConfig{
-				Urls:           m.relayCfg.Addresses,
-				TokenPayload:   string(relayToken.Payload),
-				TokenSignature: base64.StdEncoding.EncodeToString(relayToken.Signature),
-			},
-			// omit Turns to avoid updates there
-		},
-	}
-
-	m.extendNetbirdConfig(ctx, peerID, accountID, update)
-
-	log.WithContext(ctx).Debugf("sending new relay credentials to peer %s", peerID)
-	m.updateManager.SendUpdate(ctx, peerID, &network_map.UpdateMessage{
-		Update:      update,
-		MessageType: network_map.MessageTypeControlConfig,
-	})
-}
-
-func (m *TimeBasedAuthSecretsManager) extendNetbirdConfig(ctx context.Context, peerID, accountID string, update *proto.SyncResponse) {
-	extraSettings, err := m.settingsManager.GetExtraSettings(ctx, accountID)
-	if err != nil {
-		log.WithContext(ctx).Errorf("failed to get extra settings: %v", err)
-	}
-
-	peerGroups, err := m.groupsManager.GetPeerGroupIDs(ctx, accountID, peerID)
-	if err != nil {
-		log.WithContext(ctx).Errorf("failed to get peer groups: %v", err)
-	}
-
-	extendedConfig := integrationsConfig.ExtendNetBirdConfig(peerID, peerGroups, update.NetbirdConfig, extraSettings)
-	update.NetbirdConfig = extendedConfig
 }

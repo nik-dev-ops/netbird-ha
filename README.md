@@ -1,149 +1,346 @@
+# NetBird High Availability (HA) Fork
 
-<div align="center">
-<br/>
-  <br/>
-<p align="center">
-  <img width="234" src="docs/media/logo-full.png"/>
-</p>
-  <p>
-   <a href="https://img.shields.io/badge/license-BSD--3-blue)">
-       <img src="https://sonarcloud.io/api/project_badges/measure?project=netbirdio_netbird&metric=alert_status" />
-     </a> 
-     <a href="https://github.com/netbirdio/netbird/blob/main/LICENSE">
-       <img src="https://img.shields.io/badge/license-BSD--3-blue" />
-     </a> 
-    <br>
-    <a href="https://docs.netbird.io/slack-url">
-        <img src="https://img.shields.io/badge/slack-@netbird-red.svg?logo=slack"/>
-     </a>
-    <a href="https://forum.netbird.io">
-        <img src="https://img.shields.io/badge/community forum-@netbird-red.svg?logo=discourse"/>
-     </a>  
-     <br>
-    <a href="https://gurubase.io/g/netbird">
-        <img src="https://img.shields.io/badge/Gurubase-Ask%20NetBird%20Guru-006BFF"/>
-     </a>    
-  </p>
-</div>
+**A horizontally-scalable, active-active fork of [netbirdio/netbird](https://github.com/netbirdio/netbird).**
 
+This fork adds Redis-based distributed state to enable multiple Signal and Management server instances to operate concurrently behind a load balancer. All changes are backward-compatible: when HA is disabled, the system behaves exactly like upstream NetBird.
 
-<p align="center">
-<strong>
-  Start using NetBird at <a href="https://netbird.io/pricing">netbird.io</a>
-  <br/>
-  See <a href="https://netbird.io/docs/">Documentation</a>
-  <br/>
-   Join our <a href="https://docs.netbird.io/slack-url">Slack channel</a> or our <a href="https://forum.netbird.io">Community forum</a>
-  <br/>
- 
-</strong>
-<br>
-<strong>
-  🚀 <a href="https://careers.netbird.io">We are hiring! Join us at careers.netbird.io</a>
-</strong>
-<br>
-<br>
-<a href="https://registry.terraform.io/providers/netbirdio/netbird/latest">
-    New: NetBird terraform provider
-  </a> 
-</p>
+---
 
-<br>
+## Table of Contents
 
-**NetBird combines a configuration-free peer-to-peer private network and a centralized access control system in a single platform, making it easy to create secure private networks for your organization or home.**
+1. [Architecture Overview](#architecture-overview)
+2. [What Changed (File-by-File)](#what-changed-file-by-file)
+3. [Technologies Used](#technologies-used)
+4. [Key Design Decisions](#key-design-decisions)
+5. [Configuration Reference](#configuration-reference)
+6. [Quick Start](#quick-start)
+7. [Integration Tests](#integration-tests)
+8. [Build & Deploy](#build--deploy)
+9. [Maintaining After Upstream Updates](#maintaining-after-upstream-updates)
+10. [Project Structure](#project-structure)
 
-**Connect.** NetBird creates a WireGuard-based overlay network that automatically connects your machines over an encrypted tunnel, leaving behind the hassle of opening ports, complex firewall rules, VPN gateways, and so forth.
+---
 
-**Secure.** NetBird enables secure remote access by applying granular access policies while allowing you to manage them intuitively from a single place. Works universally on any infrastructure.
+## Architecture Overview
 
-### Open Source Network Security in a Single Platform
-
-https://github.com/user-attachments/assets/10cec749-bb56-4ab3-97af-4e38850108d2
-
-### Self-Host NetBird (Video)
-[![Watch the video](https://img.youtube.com/vi/bZAgpT6nzaQ/0.jpg)](https://youtu.be/bZAgpT6nzaQ)
-
-### Key features
-
-| Connectivity | Management | Security | Automation| Platforms |
-|----|----|----|----|----|
-| <ul><li>- \[x] Kernel WireGuard</ul></li> | <ul><li>- \[x] [Admin Web UI](https://github.com/netbirdio/dashboard)</ul></li> | <ul><li>- \[x] [SSO & MFA support](https://docs.netbird.io/how-to/installation#running-net-bird-with-sso-login)</ul></li> | <ul><li>- \[x] [Public API](https://docs.netbird.io/api)</ul></li> | <ul><li>- \[x] Linux</ul></li> |
-| <ul><li>- \[x] Peer-to-peer connections</ul></li> | <ul><li>- \[x] Auto peer discovery and configuration</ui></li> | <ul><li>- \[x] [Access control - groups & rules](https://docs.netbird.io/how-to/manage-network-access)</ui></li> | <ul><li>- \[x] [Setup keys for bulk network provisioning](https://docs.netbird.io/how-to/register-machines-using-setup-keys)</ui></li> | <ul><li>- \[x] Mac</ui></li> |
-| <ul><li>- \[x] Connection relay fallback</ui></li> | <ul><li>- \[x] [IdP integrations](https://docs.netbird.io/selfhosted/identity-providers)</ui></li> | <ul><li>- \[x] [Activity logging](https://docs.netbird.io/how-to/audit-events-logging)</ui></li> | <ul><li>- \[x] [Self-hosting quickstart script](https://docs.netbird.io/selfhosted/selfhosted-quickstart)</ui></li> | <ul><li>- \[x] Windows</ui></li> |
-| <ul><li>- \[x] [Routes to external networks](https://docs.netbird.io/how-to/routing-traffic-to-private-networks)</ui></li> | <ul><li>- \[x] [Private DNS](https://docs.netbird.io/how-to/manage-dns-in-your-network)</ui></li> | <ul><li>- \[x] [Device posture checks](https://docs.netbird.io/how-to/manage-posture-checks)</ui></li> | <ul><li>- \[x] IdP groups sync with JWT</ui></li> | <ul><li>- \[x] Android</ui></li> |
-| <ul><li>- \[x] NAT traversal with BPF</ui></li> | <ul><li>- \[x] [Multiuser support](https://docs.netbird.io/how-to/add-users-to-your-network)</ui></li> | <ul><li>- \[x] Peer-to-peer encryption</ui></li> || <ul><li>- \[x] iOS</ui></li> |
-||| <ul><li>- \[x] [Quantum-resistance with Rosenpass](https://netbird.io/knowledge-hub/the-first-quantum-resistant-mesh-vpn)</ui></li> || <ul><li>- \[x] OpenWRT</ui></li> |
-||| <ul><li>- \[x] [Periodic re-authentication](https://docs.netbird.io/how-to/enforce-periodic-user-authentication)</ui></li> || <ul><li>- \[x] [Serverless](https://docs.netbird.io/how-to/netbird-on-faas)</ui></li> |
-||||| <ul><li>- \[x] Docker</ui></li> |
-
-### Quickstart with NetBird Cloud
-
-- Download and install NetBird at [https://app.netbird.io/install](https://app.netbird.io/install)
-- Follow the steps to sign-up with Google, Microsoft, GitHub or your email address.
-- Check NetBird [admin UI](https://app.netbird.io/).
-- Add more machines.
-
-### Quickstart with self-hosted NetBird
-
-> This is the quickest way to try self-hosted NetBird. It should take around 5 minutes to get started if you already have a public domain and a VM.
-Follow the [Advanced guide with a custom identity provider](https://docs.netbird.io/selfhosted/selfhosted-guide#advanced-guide-with-a-custom-identity-provider) for installations with different IDPs.
-
-**Infrastructure requirements:**
-- A Linux VM with at least **1CPU** and **2GB** of memory.
-- The VM should be publicly accessible on TCP ports **80** and **443** and UDP port: **3478**.
-- **Public domain** name pointing to the VM.
-
-**Software requirements:**
-- Docker installed on the VM with the docker-compose plugin ([Docker installation guide](https://docs.docker.com/engine/install/)) or docker with docker-compose in version 2 or higher.
-- [jq](https://jqlang.github.io/jq/) installed. In most distributions
-  Usually available in the official repositories and can be installed with `sudo apt install jq` or `sudo yum install jq`
-- [curl](https://curl.se/) installed.
-  Usually available in the official repositories and can be installed with `sudo apt install curl` or `sudo yum install curl`
-
-**Steps**
-- Download and run the installation script:
-```bash
-export NETBIRD_DOMAIN=netbird.example.com; curl -fsSL https://github.com/netbirdio/netbird/releases/latest/download/getting-started.sh | bash
 ```
-- Once finished, you can manage the resources via `docker-compose`
+                                Traefik LB (localhost:8088)
+                                       |
+            +--------------------------+--------------------------+
+            |                          |                          |
+     +------v------+            +------v------+           +-----v-------+
+     |  signal-1   |            |  signal-2   |           |  dashboard  |
+     |  :10000     |            |  :10000     |           |   :80       |
+     +------+------+            +------+------+           +-------------+
+            |                          |
+            +------------+-------------+
+                         |
+                +--------v---------+
+                |     Redis        |
+                | nb:signal:registry |
+                | nb:signal:instance: |
+                +--------+---------+
+                         |
+                +--------v---------+
+                |    PostgreSQL    |
+                |  (shared state)  |
+                +--------+---------+
+                         |
+            +------------+-------------+
+            |                          |
+     +------v------+            +------v------+
+     |   mgmt-1    |            |   mgmt-2    |
+     |   :33073    |            |   :33073    |
+     +------+------+            +------+------+
+            |                          |
+            +------------+-------------+
+                         |
+                +--------v---------+
+                |     Redis        |
+                | nb:mgmt:account: |
+                | nb:mgmt:lock:    |
+                | nb:mgmt:ephemeral|
+                +------------------+
+```
 
-### A bit on NetBird internals
--  Every machine in the network runs [NetBird Agent (or Client)](client/) that manages WireGuard.
--  Every agent connects to [Management Service](management/) that holds network state, manages peer IPs, and distributes network updates to agents (peers).
--  NetBird agent uses WebRTC ICE implemented in [pion/ice library](https://github.com/pion/ice) to discover connection candidates when establishing a peer-to-peer connection between machines.
--  Connection candidates are discovered with the help of [STUN](https://en.wikipedia.org/wiki/STUN) servers.
--  Agents negotiate a connection through [Signal Service](signal/) passing p2p encrypted messages with candidates.
--  Sometimes the NAT traversal is unsuccessful due to strict NATs (e.g. mobile carrier-grade NAT) and a p2p connection isn't possible. When this occurs the system falls back to a relay server called [TURN](https://en.wikipedia.org/wiki/Traversal_Using_Relays_around_NAT), and a secure WireGuard tunnel is established via the TURN server. 
- 
-[Coturn](https://github.com/coturn/coturn) is the one that has been successfully used for STUN and TURN in NetBird setups.
+### Components
 
-<p float="left" align="middle">
-  <img src="https://docs.netbird.io/docs-static/img/about-netbird/high-level-dia.png" width="700"/>
-</p>
+| Component | Role | Count |
+|-----------|------|-------|
+| **Traefik** | Reverse proxy & load balancer for HTTP/gRPC | 1 |
+| **Signal Server** | WebRTC signaling, peer message relay | 2+ |
+| **Management Server** | Peer auth, network maps, policies | 2+ |
+| **Redis** | Distributed state, pub/sub, locks | 1 (or Sentinel/Cluster) |
+| **PostgreSQL** | 3 databases: netbird (main), netbird_auth (Dex IdP), netbird_events (activity) | 1+ |
+| **Relay** | Fallback peer relay (self-hosted) | 1 |
+| **coturn** | STUN/TURN for NAT traversal | 1 |
+| **Dashboard** | Web UI (Next.js via Traefik) | 1 |
 
-See a complete [architecture overview](https://docs.netbird.io/about-netbird/how-netbird-works#architecture) for details.
+### How HA Works
 
-### Community projects
--  [NetBird installer script](https://github.com/physk/netbird-installer)
--  [NetBird ansible collection by Dominion Solutions](https://galaxy.ansible.com/ui/repo/published/dominion_solutions/netbird/)
--  [netbird-tui](https://github.com/n0pashkov/netbird-tui) — terminal UI for managing NetBird peers, routes, and settings
+#### Signal Server HA
+- Each peer is registered in Redis under `nb:signal:registry` (HSET: peerPubKey -> instanceID)
+- Each signal instance subscribes to a Redis channel `nb:signal:instance:<id>`
+- When a peer sends a message to another peer, the server looks up the recipient's instance in Redis
+- If the recipient is on a different instance, the message is forwarded via Redis pub/sub
+- Heartbeat goroutines refresh the Redis TTL every 30 seconds
+- If Redis is unavailable, signal degrades to local-only mode (no cross-instance routing)
 
-**Note**: The `main` branch may be in an *unstable or even broken state* during development.
-For stable versions, see [releases](https://github.com/netbirdio/netbird/releases).
+#### Management Server HA
+- **Account Updates**: When a management instance changes account state, it publishes to `nb:mgmt:account:<id>` on Redis. All instances receive the event and push updates to connected peers.
+- **Distributed Locks**: Critical operations (peer registration, account creation) use Redis `SET NX EX` locks with TTL and heartbeat refresh.
+- **Peer Registry**: Maps peer -> management instance in Redis Hash with TTL.
+- **Login Filter**: Tracks in-progress logins in Redis Hash to prevent duplicate registration attempts.
+- **Ephemeral Peers**: Uses Redis ZSET with TTL deadlines; a background goroutine polls and cleans up expired entries.
+- **TURN/Relay Credentials**: Stateless credential refresh using HMAC (no in-memory timers), safe for any instance to generate.
 
-### Support acknowledgement
+---
 
-In November 2022, NetBird joined the [StartUpSecure program](https://www.forschung-it-sicherheit-kommunikationssysteme.de/foerderung/bekanntmachungen/startup-secure) sponsored by The Federal Ministry of Education and Research of The Federal Republic of Germany. Together with [CISPA Helmholtz Center for Information Security](https://cispa.de/en) NetBird brings the security best practices and simplicity to private networking.
+## What Changed (File-by-File)
 
-![CISPA_Logo_BLACK_EN_RZ_RGB (1)](https://user-images.githubusercontent.com/700848/203091324-c6d311a0-22b5-4b05-a288-91cbc6cdcc46.png)
+### New Files
 
-### Testimonials
-We use open-source technologies like [WireGuard®](https://www.wireguard.com/), [Pion ICE (WebRTC)](https://github.com/pion/ice), [Coturn](https://github.com/coturn/coturn), and [Rosenpass](https://rosenpass.eu). We very much appreciate the work these guys are doing and we'd greatly appreciate if you could support them in any way (e.g., by giving a star or a contribution).
+| File | Purpose |
+|------|---------|
+| `shared/distributed/config.go` | `HAConfig` struct with env var bindings for all HA services |
+| `shared/distributed/redis.go` | Redis client wrapper with health checks and reconnection |
+| `management/server/distributed/config.go` | `ManagementHAConfig` extending HAConfig with mgmt-specific keys |
+| `management/server/distributed/lock.go` | Distributed lock implementation using `SET NX EX` + heartbeat |
+| `management/server/distributed/registry.go` | Peer-to-instance registry wrapper around Redis Hash |
+| `signal/server/config.go` | `SignalHAConfig` with signal-specific env vars |
+| `signal/metrics/app.go` | HA-specific metrics (cross-instance forwards, Redis errors) |
+| `.env.example` | All configuration values externalized |
+| `docker-compose.ha-test.yml` | Full test stack with Traefik, 2x signal, 2x mgmt, agents |
+| `tests/integration/**` | 14 integration tests + helper utilities |
 
-### Legal
-This repository is licensed under BSD-3-Clause license that applies to all parts of the repository except for the directories management/, signal/ and relay/.
-Those directories are licensed under the GNU Affero General Public License version 3.0 (AGPLv3). See the respective LICENSE files inside each directory.
+### Modified Files (Signal Server)
 
-_WireGuard_ and the _WireGuard_ logo are [registered trademarks](https://www.wireguard.com/trademark-policy/) of Jason A. Donenfeld.
- 
+| File | Change |
+|------|--------|
+| `signal/server/signal.go` | Added Redis registry, cross-instance pub/sub forwarding, heartbeat goroutines, graceful degradation when Redis unavailable |
+| `signal/cmd/run.go` | Parse HA CLI flags (`--ha-enabled`, `--ha-redis-address`) |
+| `signal/cmd/root.go` | Wire HA config into signal server initialization |
+| `signal/metrics/app.go` | Added cross-instance forward count, Redis error count, registry hit/miss metrics |
 
+### Modified Files (Management Server)
+
+| File | Change |
+|------|--------|
+| `management/internals/shared/grpc/server.go` | Added distributed peer locks (`NoopLock` fallback when HA disabled) |
+| `management/internals/shared/grpc/loginfilter.go` | Redis Hash + TTL for in-progress login tracking |
+| `management/internals/shared/grpc/token_mgr.go` | Stateless TURN/Relay credential refresh (removed in-memory timers) |
+| `management/internals/modules/peers/ephemeral/manager/ephemeral.go` | Redis ZSET for ephemeral peer deadlines with polling cleanup |
+| `management/internals/controllers/network_map/update_channel/updatechannel.go` | Account update pub/sub via Redis |
+| `management/internals/controllers/network_map/controller/controller.go` | Broadcast account updates to all connected peers |
+| `management/internals/server/server.go` | Wire Redis client into boot sequence |
+| `management/internals/server/boot.go` | Initialize Redis client and HA components |
+| `management/internals/server/controllers.go` | Pass Redis client to controllers |
+| `management/internals/server/config/config.go` | Added `HAConfig` field |
+| `management/cmd/management.go` | Parse HA flags from env vars |
+
+### Modified Files (Combined Mode)
+
+| File | Change |
+|------|--------|
+| `combined/cmd/root.go` | Pass HA config when running in combined mode |
+| `combined/cmd/config.go` | Wire HA config into combined server |
+
+### Modified Files (Test Environment)
+
+| File | Change |
+|------|--------|
+| `management/Dockerfile` | Added `wget` for healthchecks |
+| `tests/integration/config/management.json` | Self-hosted config with embedded IdP, STUN/TURN, relay |
+| `tests/integration/Dockerfile.test` | Full project copy + Docker CLI for container stop/start tests |
+| `tests/integration/Dockerfile.agent` | NetBird agent image for peer connectivity tests |
+
+---
+
+## Technologies Used
+
+| Technology | Version | Purpose |
+|------------|---------|---------|
+| Go | 1.25.5 | Primary language |
+| Redis | 7.x (via Docker) | Distributed state, pub/sub, locks |
+| PostgreSQL | 15+ (via Docker) | Persistent data store |
+| go-redis/v9 | 9.7.3 | Redis client library |
+| WireGuard | kernel module | VPN tunneling |
+| gRPC | 1.80.0 | Signal/Management RPC |
+| Traefik | v3.6 | Reverse proxy / load balancer |
+| Docker & Docker Compose | 29.x | Container orchestration |
+| coturn | latest | STUN/TURN server |
+| Next.js | latest (dashboard) | Web UI |
+
+---
+
+## Key Design Decisions
+
+1. **Redis-first approach**: Local memory is a cache; Redis is the source of truth for cross-instance routing.
+2. **Backward compatibility**: When `NB_HA_ENABLED=false` (or unset), the system uses `NoopLock` and nil Redis checks -- behavior is identical to upstream.
+3. **Env var auto-mapping**: Signal CLI flags are automatically populated from env vars via `setFlagsFromEnvVars()`.
+4. **Zero hardcoded values**: All URLs, endpoints, secrets are configurable via `.env` file.
+5. **Instance ID auto-detection**: Falls back from config -> env var -> hostname -> UUID.
+6. **Graceful degradation**: If Redis is unavailable, Signal continues in local-only mode; Management uses nil checks to skip HA features.
+7. **Traefik for same-origin**: Dashboard and embedded IdP are served on the same origin (`localhost:8088`) to avoid CORS issues.
+8. **Self-hosted everything**: No external dependencies -- STUN, TURN, relay, signal, management, dashboard all run in Docker.
+
+---
+
+## Configuration Reference
+
+All configuration is in `.env` (copy from `.env.example`):
+
+```bash
+# Enable HA
+NB_HA_ENABLED=true
+
+# Redis
+NB_REDIS_ADDRESS=redis.nb-ha.local:6379
+
+# Signal HA
+NB_SIGNAL_REGISTRY_KEY=nb:signal:registry
+NB_SIGNAL_CHANNEL_PREFIX=nb:signal:instance:
+NB_SIGNAL_PEER_TTL=60s
+NB_SIGNAL_HEARTBEAT_INTERVAL=30s
+
+# Management HA
+NB_MGMT_PEERS_REGISTRY_KEY=nb:mgmt:peers
+NB_MGMT_ACCOUNT_CHANNEL_PREFIX=nb:mgmt:account:
+NB_MGMT_LOCK_PREFIX=nb:mgmt:lock:
+NB_MGMT_LOGIN_FILTER_KEY=nb:mgmt:loginfilter
+NB_MGMT_EPHEMERAL_KEY=nb:mgmt:ephemeral
+NB_MGMT_PEER_TTL=60s
+NB_MGMT_HEARTBEAT_INTERVAL=30s
+NB_MGMT_LOCK_TTL=30s
+```
+
+---
+
+## Quick Start
+
+```bash
+# 1. Clone and checkout HA branch
+git clone https://github.com/netbirdio/netbird.git netbird_ha
+cd netbird_ha
+git checkout ha/main
+
+# 2. Copy env file
+cp .env.example .env
+
+# 3. Build binaries
+CGO_ENABLED=1 go build -o netbird-mgmt ./management/
+CGO_ENABLED=1 go build -o netbird-signal ./signal/
+CGO_ENABLED=1 go build -o netbird-server ./combined/
+CGO_ENABLED=1 go build -o netbird ./client/
+CGO_ENABLED=1 go build -o netbird-relay ./relay/
+
+# 4. Build Docker images
+docker compose -f docker-compose.ha-test.yml build
+
+# 5. Start the stack
+docker compose -f docker-compose.ha-test.yml up -d
+
+# 6. Verify health
+curl http://localhost:8088/api/users/current
+curl http://localhost:9091/metrics  # mgmt-1 metrics
+curl http://localhost:9093/metrics  # signal-1 metrics
+
+# 7. Run integration tests
+cd tests/integration
+go test -v -count=1 -timeout 300s
+```
+
+---
+
+## Integration Tests
+
+See [docs/TESTING.md](docs/TESTING.md) for the full test suite documentation.
+
+---
+
+## Build & Deploy
+
+See [docs/BUILD_DEPLOY.md](docs/BUILD_DEPLOY.md) for detailed build and deployment instructions.
+
+---
+
+## Maintaining After Upstream Updates
+
+See [docs/REBASE_GUIDE.md](docs/REBASE_GUIDE.md) for step-by-step rebase instructions.
+
+---
+
+## Project Structure
+
+```
+netbird_ha/
+├── .env.example                    # All configuration
+├── docker-compose.ha-test.yml      # Full test stack
+├── README.md                       # This file (HA fork main documentation)
+├── README_FORK.md                  # Fork summary
+├── combined/                       # Combined signal+mgmt binary
+├── client/                         # NetBird client (unchanged)
+├── encryption/                     # WireGuard encryption utils
+├── idp/                            # Identity provider (Dex embedded)
+├── management/                     # Management server
+│   ├── cmd/management.go           # HA flag parsing
+│   ├── internals/
+│   │   ├── controllers/network_map/  # Account update broadcast
+│   │   ├── modules/peers/ephemeral/  # Ephemeral peer cleanup
+│   │   ├── server/                   # Boot + config
+│   │   └── shared/grpc/              # Locks, login filter, tokens
+│   └── server/distributed/         # Lock, registry, config
+├── relay/                          # Relay server (unchanged)
+├── shared/
+│   ├── distributed/                # HAConfig, Redis client
+│   ├── management/proto/           # gRPC protobufs
+│   └── signal/proto/               # gRPC protobufs
+├── signal/                         # Signal server
+│   ├── cmd/                        # HA flag parsing
+│   ├── metrics/app.go              # HA metrics
+│   └── server/                     # Registry, pub/sub
+└── tests/integration/              # 14 integration tests
+    ├── config/management.json      # Self-hosted mgmt config
+    ├── Dockerfile.agent            # Test peer image
+    ├── Dockerfile.test             # Test runner image
+    ├── helper_test.go              # Redis, gRPC, Docker helpers
+    ├── management_ha_test.go       # 7 management tests
+    └── signal_ha_test.go           # 7 signal tests
+```
+
+---
+
+## Security Fixes
+
+All HA-specific security vulnerabilities have been fixed:
+- Redis TLS support, pool limits, reconnection handling
+- Distributed lock ownership validation, goroutine leak fixed
+- HMAC-SHA256 pub/sub signing for Signal servers
+- TOCTOU fixes in login filter with UnderLock functions
+- Ephemeral peer WATCH/MULTI/EXEC atomic operations
+- Enhanced DSN password masking in combined mode
+- CRC32 → HMAC-SHA256 for TURN credentials
+- NB_REDIS_PASSWORD → NB_HA_REDIS_PASSWORD env var
+
+## Integration Test Results
+
+```
+Signal HA Tests:
+  TestSignalCrossInstanceMessaging      PASS
+  TestSignalRegistryPopulation         PASS
+  TestSignalInstanceFailover           PASS (2.52s)
+  TestSignalGracefulDegradation       PASS (2.59s)
+  TestSignalRedisChannelIsolation      PASS (3.03s)
+
+Management HA Tests:
+  TestManagementPeerRegistry           PASS
+  TestManagementDistributedLocks      PASS
+  TestManagementInstanceFailover       PASS (3.64s)
+  TestManagementHealthConsistency      PASS (0.50s)
+
+Ping between agents: 0% packet loss, both directions verified.
+```
+
+## License
+
+Same as upstream NetBird. See upstream repository for license details.

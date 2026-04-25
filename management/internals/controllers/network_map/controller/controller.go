@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/exp/maps"
 	"golang.org/x/mod/semver"
@@ -65,6 +66,10 @@ type Controller struct {
 	expNewNetworkMapAIDs map[string]struct{}
 
 	compactedNetworkMap bool
+
+	// HA fields for cross-instance update propagation via Redis pub/sub
+	haRedisClient        *redis.Client
+	accountChannelPrefix string
 }
 
 type bufferUpdate struct {
@@ -126,6 +131,12 @@ func NewController(ctx context.Context, store store.Store, metrics telemetry.App
 	}
 }
 
+// SetRedisPublisher configures the Redis client and account channel prefix for HA cross-instance updates.
+func (c *Controller) SetRedisPublisher(redisClient *redis.Client, accountChannelPrefix string) {
+	c.haRedisClient = redisClient
+	c.accountChannelPrefix = accountChannelPrefix
+}
+
 func (c *Controller) OnPeerConnected(ctx context.Context, accountID string, peerID string) (chan *network_map.UpdateMessage, error) {
 	peer, err := c.repo.GetPeerByID(ctx, accountID, peerID)
 	if err != nil {
@@ -152,6 +163,12 @@ func (c *Controller) CountStreams() int {
 }
 
 func (c *Controller) sendUpdateAccountPeers(ctx context.Context, accountID string) error {
+	err := c.sendUpdateToLocalAccountPeers(ctx, accountID)
+	c.publishAccountUpdate(ctx, accountID)
+	return err
+}
+
+func (c *Controller) sendUpdateToLocalAccountPeers(ctx context.Context, accountID string) error {
 	log.WithContext(ctx).Tracef("updating peers for account %s from %s", accountID, util.GetCallerName())
 	var (
 		account *types.Account
@@ -279,6 +296,27 @@ func (c *Controller) sendUpdateAccountPeers(ctx context.Context, accountID strin
 	}
 
 	return nil
+}
+
+func (c *Controller) publishAccountUpdate(ctx context.Context, accountID string) {
+	if c.haRedisClient == nil || c.accountChannelPrefix == "" {
+		return
+	}
+
+	channel := fmt.Sprintf("%s%s", c.accountChannelPrefix, accountID)
+	if err := c.haRedisClient.Publish(ctx, channel, "account_updated").Err(); err != nil {
+		log.WithContext(ctx).Warnf("failed to publish account update to channel %s: %v", channel, err)
+	}
+}
+
+// HandleRemoteAccountUpdate handles account updates received from Redis pub/sub by recalculating
+// the network map and sending updates to all locally connected peers for the account.
+func (c *Controller) HandleRemoteAccountUpdate(ctx context.Context, accountID string) error {
+	log.WithContext(ctx).Debugf("handling remote account update for account %s", accountID)
+	if err := c.RecalculateNetworkMapCache(ctx, accountID); err != nil {
+		return fmt.Errorf("recalculate network map cache for remote update: %v", err)
+	}
+	return c.sendUpdateToLocalAccountPeers(ctx, accountID)
 }
 
 func (c *Controller) bufferSendUpdateAccountPeers(ctx context.Context, accountID string) error {

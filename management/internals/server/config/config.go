@@ -5,6 +5,7 @@ import (
 
 	"github.com/netbirdio/netbird/management/server/idp"
 	"github.com/netbirdio/netbird/management/server/types"
+	"github.com/netbirdio/netbird/shared/distributed"
 	"github.com/netbirdio/netbird/shared/management/client/common"
 	"github.com/netbirdio/netbird/util"
 )
@@ -61,6 +62,10 @@ type Config struct {
 	// EmbeddedIdP contains configuration for the embedded Dex OIDC provider.
 	// When set, Dex will be embedded in the management server and serve requests at /oauth2/
 	EmbeddedIdP *idp.EmbeddedIdPConfig
+
+	// HA contains optional high-availability configuration.
+	// When nil (the default) HA mode is disabled, preserving backward compatibility.
+	HA *distributed.HAConfig
 }
 
 // GetAuthAudiences returns the audience from the http config and device authorization flow config

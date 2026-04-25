@@ -33,6 +33,7 @@ import (
 	"github.com/netbirdio/netbird/management/server/http/middleware"
 	"github.com/netbirdio/netbird/management/server/store"
 	"github.com/netbirdio/netbird/management/server/telemetry"
+	"github.com/netbirdio/netbird/shared/distributed"
 	mgmtProto "github.com/netbirdio/netbird/shared/management/proto"
 	"github.com/netbirdio/netbird/util/crypt"
 )
@@ -58,6 +59,12 @@ func (s *BaseServer) Metrics() telemetry.AppMetrics {
 			log.Fatalf("error while creating app metrics: %s", err)
 		}
 		return appMetrics
+	})
+}
+
+func (s *BaseServer) RedisClient() *distributed.Client {
+	return Create(s, func() *distributed.Client {
+		return nil
 	})
 }
 
@@ -173,7 +180,7 @@ func (s *BaseServer) GRPCServer() *grpc.Server {
 		}
 
 		gRPCAPIHandler := grpc.NewServer(gRPCOpts...)
-		srv, err := nbgrpc.NewServer(s.Config, s.AccountManager(), s.SettingsManager(), s.JobManager(), s.SecretsManager(), s.Metrics(), s.AuthManager(), s.IntegratedValidator(), s.NetworkMapController(), s.OAuthConfigProvider())
+		srv, err := nbgrpc.NewServer(s.Config, s.AccountManager(), s.SettingsManager(), s.JobManager(), s.SecretsManager(), s.Metrics(), s.AuthManager(), s.IntegratedValidator(), s.NetworkMapController(), s.OAuthConfigProvider(), nil, nil)
 		if err != nil {
 			log.Fatalf("failed to create management server: %v", err)
 		}

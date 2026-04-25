@@ -22,6 +22,11 @@ type AppMetrics struct {
 	MessageForwardLatency  metric.Float64Histogram
 
 	MessageSize metric.Int64Histogram
+
+	MessagesForwardedCrossInstance metric.Int64Counter
+	RedisUnavailableErrors         metric.Int64Counter
+	RegistryHitLocal               metric.Int64Counter
+	RegistryMissLocal              metric.Int64Counter
 }
 
 func NewAppMetrics(meter metric.Meter, prefix ...string) (*AppMetrics, error) {
@@ -113,6 +118,34 @@ func NewAppMetrics(meter metric.Meter, prefix ...string) (*AppMetrics, error) {
 		return nil, err
 	}
 
+	messagesForwardedCrossInstance, err := meter.Int64Counter(p+"message_forward_cross_instance_total",
+		metric.WithDescription("Total number of messages forwarded to peers on other instances"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	redisUnavailableErrors, err := meter.Int64Counter(p+"redis_unavailable_errors_total",
+		metric.WithDescription("Total number of redis unavailable errors"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	registryHitLocal, err := meter.Int64Counter(p+"registry_hit_local_total",
+		metric.WithDescription("Total number of local registry hits"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	registryMissLocal, err := meter.Int64Counter(p+"registry_miss_local_total",
+		metric.WithDescription("Total number of local registry misses"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	return &AppMetrics{
 		Meter: meter,
 
@@ -130,6 +163,11 @@ func NewAppMetrics(meter metric.Meter, prefix ...string) (*AppMetrics, error) {
 		MessageForwardLatency:  messageForwardLatency,
 
 		MessageSize: messageSize,
+
+		MessagesForwardedCrossInstance: messagesForwardedCrossInstance,
+		RedisUnavailableErrors:         redisUnavailableErrors,
+		RegistryHitLocal:               registryHitLocal,
+		RegistryMissLocal:              registryMissLocal,
 	}, nil
 }
 

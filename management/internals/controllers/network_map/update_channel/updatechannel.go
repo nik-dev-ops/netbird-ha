@@ -2,9 +2,12 @@ package update_channel
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/netbirdio/netbird/management/internals/controllers/network_map"
@@ -177,4 +180,44 @@ func (p *PeersUpdateManager) CountStreams() int {
 	p.channelsMux.RLock()
 	defer p.channelsMux.RUnlock()
 	return len(p.peerChannels)
+}
+
+// SubscribeToAccountUpdates subscribes to Redis pub/sub for account update channels.
+// When a remote instance publishes an account update, the handler is invoked with the accountID.
+// The subscription runs in a background goroutine and cancels when the provided context is done.
+func (p *PeersUpdateManager) SubscribeToAccountUpdates(ctx context.Context, redisClient *redis.Client, accountChannelPrefix string, handler func(accountID string)) {
+	if redisClient == nil {
+		log.WithContext(ctx).Debug("redis client is nil, skipping account update subscription")
+		return
+	}
+
+	pattern := fmt.Sprintf("%s*", accountChannelPrefix)
+	pubsub := redisClient.PSubscribe(ctx, pattern)
+
+	go func() {
+		defer pubsub.Close()
+
+		ch := pubsub.Channel()
+		for {
+			select {
+			case <-ctx.Done():
+				log.WithContext(ctx).Debug("stopping account update subscription")
+				return
+			case msg, ok := <-ch:
+				if !ok {
+					log.WithContext(ctx).Debug("account update subscription channel closed")
+					return
+				}
+
+				accountID := strings.TrimPrefix(msg.Channel, accountChannelPrefix)
+				if accountID == "" {
+					log.WithContext(ctx).Warnf("received account update on channel %s but could not extract account ID", msg.Channel)
+					continue
+				}
+
+				log.WithContext(ctx).Debugf("received remote account update for account %s", accountID)
+				handler(accountID)
+			}
+		}
+	}()
 }

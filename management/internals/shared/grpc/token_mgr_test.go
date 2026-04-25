@@ -13,13 +13,10 @@ import (
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/netbirdio/netbird/management/internals/controllers/network_map"
 	"github.com/netbirdio/netbird/management/internals/controllers/network_map/update_channel"
 	"github.com/netbirdio/netbird/management/internals/server/config"
 	"github.com/netbirdio/netbird/management/server/groups"
 	"github.com/netbirdio/netbird/management/server/settings"
-	"github.com/netbirdio/netbird/management/server/types"
-	"github.com/netbirdio/netbird/shared/management/proto"
 	"github.com/netbirdio/netbird/util"
 )
 
@@ -83,9 +80,7 @@ func TestTimeBasedAuthSecretsManager_GenerateCredentials(t *testing.T) {
 func TestTimeBasedAuthSecretsManager_SetupRefresh(t *testing.T) {
 	ttl := util.Duration{Duration: 2 * time.Second}
 	secret := "some_secret"
-	peersManager := update_channel.NewPeersUpdateManager(nil)
 	peer := "some_peer"
-	updateChannel := peersManager.CreateChannel(context.Background(), peer)
 
 	rc := &config.Relay{
 		Addresses:      []string{"localhost:0"},
@@ -96,10 +91,9 @@ func TestTimeBasedAuthSecretsManager_SetupRefresh(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	t.Cleanup(ctrl.Finish)
 	settingsMockManager := settings.NewMockManager(ctrl)
-	settingsMockManager.EXPECT().GetExtraSettings(gomock.Any(), "someAccountID").Return(&types.ExtraSettings{}, nil).AnyTimes()
 	groupsManager := groups.NewManagerMock()
 
-	tested, err := NewTimeBasedAuthSecretsManager(peersManager, &config.TURNConfig{
+	tested, err := NewTimeBasedAuthSecretsManager(nil, &config.TURNConfig{
 		CredentialsTTL:       ttl,
 		Secret:               secret,
 		Turns:                []*config.Host{TurnTestHost},
@@ -110,86 +104,14 @@ func TestTimeBasedAuthSecretsManager_SetupRefresh(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// SetupRefresh is a no-op in the stateless implementation.
+	// It should not panic and should not start any background goroutines.
 	tested.SetupRefresh(ctx, "someAccountID", peer)
-
-	if _, ok := tested.turnCancelMap[peer]; !ok {
-		t.Errorf("expecting peer to be present in the turn cancel map, got not present")
-	}
-
-	if _, ok := tested.relayCancelMap[peer]; !ok {
-		t.Errorf("expecting peer to be present in the relay cancel map, got not present")
-	}
-
-	var updates []*network_map.UpdateMessage
-
-loop:
-	for timeout := time.After(5 * time.Second); ; {
-		select {
-		case update := <-updateChannel:
-			updates = append(updates, update)
-		case <-timeout:
-			break loop
-		}
-
-		if len(updates) >= 2 {
-			break loop
-		}
-	}
-
-	if len(updates) < 2 {
-		t.Errorf("expecting at least 2 peer credentials updates, got %v", len(updates))
-	}
-
-	var turnUpdates, relayUpdates int
-	var firstTurnUpdate, secondTurnUpdate *proto.ProtectedHostConfig
-	var firstRelayUpdate, secondRelayUpdate *proto.RelayConfig
-
-	for _, update := range updates {
-		if turns := update.Update.GetNetbirdConfig().GetTurns(); len(turns) > 0 {
-			turnUpdates++
-			if turnUpdates == 1 {
-				firstTurnUpdate = turns[0]
-			} else {
-				secondTurnUpdate = turns[0]
-			}
-		}
-		if relay := update.Update.GetNetbirdConfig().GetRelay(); relay != nil {
-			// avoid updating on turn updates since they also send relay credentials
-			if update.Update.GetNetbirdConfig().GetTurns() == nil {
-				relayUpdates++
-				if relayUpdates == 1 {
-					firstRelayUpdate = relay
-				} else {
-					secondRelayUpdate = relay
-				}
-			}
-		}
-	}
-
-	if turnUpdates < 1 {
-		t.Errorf("expecting at least 1 TURN credential update, got %v", turnUpdates)
-	}
-	if relayUpdates < 1 {
-		t.Errorf("expecting at least 1 relay credential update, got %v", relayUpdates)
-	}
-
-	if firstTurnUpdate != nil && secondTurnUpdate != nil {
-		if firstTurnUpdate.Password == secondTurnUpdate.Password {
-			t.Errorf("expecting first TURN credential update password %v to be different from second, got equal", firstTurnUpdate.Password)
-		}
-	}
-
-	if firstRelayUpdate != nil && secondRelayUpdate != nil {
-		if firstRelayUpdate.TokenSignature == secondRelayUpdate.TokenSignature {
-			t.Errorf("expecting first relay credential update signature %v to be different from second, got equal", firstRelayUpdate.TokenSignature)
-		}
-	}
 }
 
 func TestTimeBasedAuthSecretsManager_CancelRefresh(t *testing.T) {
 	ttl := util.Duration{Duration: time.Hour}
 	secret := "some_secret"
-	peersManager := update_channel.NewPeersUpdateManager(nil)
 	peer := "some_peer"
 
 	rc := &config.Relay{
@@ -203,7 +125,7 @@ func TestTimeBasedAuthSecretsManager_CancelRefresh(t *testing.T) {
 	settingsMockManager := settings.NewMockManager(ctrl)
 	groupsManager := groups.NewManagerMock()
 
-	tested, err := NewTimeBasedAuthSecretsManager(peersManager, &config.TURNConfig{
+	tested, err := NewTimeBasedAuthSecretsManager(nil, &config.TURNConfig{
 		CredentialsTTL:       ttl,
 		Secret:               secret,
 		Turns:                []*config.Host{TurnTestHost},
@@ -211,21 +133,12 @@ func TestTimeBasedAuthSecretsManager_CancelRefresh(t *testing.T) {
 	}, rc, settingsMockManager, groupsManager)
 	require.NoError(t, err)
 
-	tested.SetupRefresh(context.Background(), "someAccountID", peer)
-	if _, ok := tested.turnCancelMap[peer]; !ok {
-		t.Errorf("expecting peer to be present in turn cancel map, got not present")
-	}
-	if _, ok := tested.relayCancelMap[peer]; !ok {
-		t.Errorf("expecting peer to be present in relay cancel map, got not present")
-	}
-
+	// CancelRefresh is a no-op in the stateless implementation.
+	// It should not panic even when called before SetupRefresh or multiple times.
 	tested.CancelRefresh(peer)
-	if _, ok := tested.turnCancelMap[peer]; ok {
-		t.Errorf("expecting peer to be not present in turn cancel map, got present")
-	}
-	if _, ok := tested.relayCancelMap[peer]; ok {
-		t.Errorf("expecting peer to be not present in relay cancel map, got present")
-	}
+	tested.SetupRefresh(context.Background(), "someAccountID", peer)
+	tested.CancelRefresh(peer)
+	tested.CancelRefresh(peer)
 }
 
 func validateMAC(t *testing.T, algo func() hash.Hash, username string, actualMAC string, key []byte) {

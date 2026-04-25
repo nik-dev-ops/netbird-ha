@@ -1,0 +1,484 @@
+# NetBird HA Test Environment
+# Full-stack Docker Compose for testing active-active horizontal scaling
+# ALL configuration comes from .env file — nothing is hardcoded
+#
+# Usage:
+#   cp .env.example .env
+#   # Edit .env with your desired values
+#   docker compose -f docker-compose.ha-test.yml up --build
+
+services:
+  # --- Infrastructure ---
+  redis:
+    image: redis:7-alpine
+    container_name: nb-redis
+    hostname: redis.${NB_DOMAIN}
+    ports:
+      - "${NB_HOST_REDIS_PORT}:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - nb-control
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: nb-postgres
+    hostname: postgres.${NB_DOMAIN}
+    environment:
+      POSTGRES_USER: ${NB_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${NB_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${NB_POSTGRES_DB}
+    ports:
+      - "${NB_HOST_POSTGRES_PORT}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres-init.sh:/docker-entrypoint-initdb.d/create-additional-dbs.sh
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${NB_POSTGRES_USER} -d ${NB_POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - nb-control
+
+  # --- STUN/TURN Server (self-hosted) ---
+  coturn:
+    image: coturn/coturn:4.6
+    container_name: nb-coturn
+    hostname: turn.${NB_DOMAIN}
+    environment:
+      TURN_SERVER_NAME: "netbird-turn"
+      TURN_REALM: ${NB_TURN_REALM}
+      TURN_SECRET: ${NB_TURN_SECRET}
+    ports:
+      - "${NB_HOST_TURN_PORT}:3478"
+      - "${NB_HOST_TURN_PORT}:3478/udp"
+      - "${NB_HOST_TURN_TLS_PORT}:5349"
+      - "${NB_HOST_TURN_TLS_PORT}:5349/udp"
+    command: >
+      -n
+      --log-file=stdout
+      --realm=${NB_TURN_REALM}
+      --listening-port=${NB_TURN_PORT}
+      --tls-listening-port=5349
+      --min-port=49152
+      --max-port=65535
+      --fingerprint
+      --lt-cred-mech
+      --user=netbird:${NB_TURN_SECRET}
+      --stun-only
+      --no-cli
+      --no-tlsv1
+      --no-tlsv1_1
+    networks:
+      - nb-control
+      - nb-public
+
+  # --- Relay Server (self-hosted) ---
+  relay:
+    build:
+      context: .
+      dockerfile: relay/Dockerfile
+    container_name: nb-relay
+    hostname: relay.${NB_DOMAIN}
+    environment:
+      NB_LOG_LEVEL: ${NB_LOG_LEVEL}
+      NB_LOG_FILE: ${NB_LOG_FILE}
+      NB_AUTH_SECRET: ${NB_RELAY_SECRET}
+      NB_LISTEN_ADDRESS: ${NB_RELAY_LISTEN_ADDRESS}
+      NB_EXPOSED_ADDRESS: ${NB_RELAY_EXPOSED_ADDRESS}
+      NB_METRICS_PORT: "9090"
+    ports:
+      - "${NB_HOST_RELAY_PORT}:443"
+      - "${NB_HOST_RELAY_METRICS}:9090"
+    command: ["--log-file", "console"]
+    networks:
+      - nb-control
+      - nb-public
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # --- Signal Servers (Active-Active HA) ---
+  signal-1:
+    build:
+      context: .
+      dockerfile: signal/Dockerfile
+    container_name: nb-signal-1
+    hostname: signal-1.${NB_DOMAIN}
+    environment:
+      NB_LOG_LEVEL: ${NB_LOG_LEVEL}
+      NB_LOG_FILE: ${NB_LOG_FILE}
+      NB_HA_ENABLED: ${NB_HA_ENABLED}
+      NB_HA_REDIS_ADDRESS: ${NB_REDIS_ADDRESS}
+      NB_HA_INSTANCE_ID: signal-1
+      NB_SIGNAL_REGISTRY_KEY: ${NB_SIGNAL_REGISTRY_KEY}
+      NB_SIGNAL_CHANNEL_PREFIX: ${NB_SIGNAL_CHANNEL_PREFIX}
+      NB_SIGNAL_PEER_TTL: ${NB_SIGNAL_PEER_TTL}
+      NB_SIGNAL_HEARTBEAT_INTERVAL: ${NB_SIGNAL_HEARTBEAT_INTERVAL}
+      NB_SIGNAL_SEND_TIMEOUT: ${NB_SIGNAL_SEND_TIMEOUT}
+      NB_METRICS_PORT: "9090"
+    ports:
+      - "${NB_HOST_SIGNAL1_PORT}:10000"
+      - "${NB_HOST_SIGNAL1_METRICS}:9090"
+    command: ["--port", "10000", "--log-file", "console"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - nb-control
+      - nb-public
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.netbird-signal.rule=PathPrefix(`/signalexchange.SignalExchange/`)
+      - traefik.http.routers.netbird-signal.entrypoints=web
+      - traefik.http.routers.netbird-signal.priority=100
+      - traefik.http.routers.netbird-signal.service=signal-h2c
+      - traefik.http.services.signal-h2c.loadbalancer.server.port=10000
+      - traefik.http.services.signal-h2c.loadbalancer.server.scheme=h2c
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/metrics"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  signal-2:
+    build:
+      context: .
+      dockerfile: signal/Dockerfile
+    container_name: nb-signal-2
+    hostname: signal-2.${NB_DOMAIN}
+    environment:
+      NB_LOG_LEVEL: ${NB_LOG_LEVEL}
+      NB_LOG_FILE: ${NB_LOG_FILE}
+      NB_HA_ENABLED: ${NB_HA_ENABLED}
+      NB_HA_REDIS_ADDRESS: ${NB_REDIS_ADDRESS}
+      NB_HA_INSTANCE_ID: signal-2
+      NB_SIGNAL_REGISTRY_KEY: ${NB_SIGNAL_REGISTRY_KEY}
+      NB_SIGNAL_CHANNEL_PREFIX: ${NB_SIGNAL_CHANNEL_PREFIX}
+      NB_SIGNAL_PEER_TTL: ${NB_SIGNAL_PEER_TTL}
+      NB_SIGNAL_HEARTBEAT_INTERVAL: ${NB_SIGNAL_HEARTBEAT_INTERVAL}
+      NB_SIGNAL_SEND_TIMEOUT: ${NB_SIGNAL_SEND_TIMEOUT}
+      NB_METRICS_PORT: "9090"
+    ports:
+      - "${NB_HOST_SIGNAL2_PORT}:10000"
+      - "${NB_HOST_SIGNAL2_METRICS}:9090"
+    command: ["--port", "10000", "--log-file", "console"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - nb-control
+      - nb-public
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.netbird-signal-2.rule=PathPrefix(`/signalexchange.SignalExchange/`)
+      - traefik.http.routers.netbird-signal-2.entrypoints=web
+      - traefik.http.routers.netbird-signal-2.priority=100
+      - traefik.http.routers.netbird-signal-2.service=signal-h2c
+      - traefik.http.services.signal-h2c.loadbalancer.server.port=10000
+      - traefik.http.services.signal-h2c.loadbalancer.server.scheme=h2c
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/metrics"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # --- Management Servers (Active-Active HA) ---
+  mgmt-1:
+    build:
+      context: .
+      dockerfile: management/Dockerfile
+    container_name: nb-mgmt-1
+    hostname: mgmt-1.${NB_DOMAIN}
+    environment:
+      NB_LOG_LEVEL: ${NB_LOG_LEVEL}
+      NB_LOG_FILE: ${NB_LOG_FILE}
+      NB_STORE_ENGINE: postgres
+      NB_STORE_ENGINE_POSTGRES_DSN: postgres://${NB_POSTGRES_USER}:${NB_POSTGRES_PASSWORD}@${NB_POSTGRES_HOST}:${NB_POSTGRES_PORT}/${NB_POSTGRES_DB}?sslmode=${NB_POSTGRES_SSLMODE}
+      NB_AUTH_STORE_DSN: postgres://${NB_POSTGRES_USER}:${NB_POSTGRES_PASSWORD}@${NB_POSTGRES_HOST}:${NB_POSTGRES_PORT}/netbird_auth?sslmode=${NB_POSTGRES_SSLMODE}
+      NB_ACTIVITY_EVENT_STORE_ENGINE: postgres
+      NB_ACTIVITY_EVENT_POSTGRES_DSN: postgres://${NB_POSTGRES_USER}:${NB_POSTGRES_PASSWORD}@${NB_POSTGRES_HOST}:${NB_POSTGRES_PORT}/netbird_events?sslmode=${NB_POSTGRES_SSLMODE}
+      NB_HA_ENABLED: ${NB_HA_ENABLED}
+      NB_HA_REDIS_ADDRESS: ${NB_REDIS_ADDRESS}
+      NB_HA_INSTANCE_ID: mgmt-1
+      NB_MGMT_PEERS_REGISTRY_KEY: ${NB_MGMT_PEERS_REGISTRY_KEY}
+      NB_MGMT_ACCOUNT_CHANNEL_PREFIX: ${NB_MGMT_ACCOUNT_CHANNEL_PREFIX}
+      NB_MGMT_LOCK_PREFIX: ${NB_MGMT_LOCK_PREFIX}
+      NB_MGMT_LOGIN_FILTER_KEY: ${NB_MGMT_LOGIN_FILTER_KEY}
+      NB_MGMT_EPHEMERAL_KEY: ${NB_MGMT_EPHEMERAL_KEY}
+      NB_MGMT_PEER_TTL: ${NB_MGMT_PEER_TTL}
+      NB_MGMT_HEARTBEAT_INTERVAL: ${NB_MGMT_HEARTBEAT_INTERVAL}
+      NB_MGMT_LOCK_TTL: ${NB_MGMT_LOCK_TTL}
+      NB_MGMT_METRICS_PORT: "9090"
+    ports:
+      - "${NB_HOST_MGMT1_PORT}:33073"
+      - "${NB_HOST_MGMT1_METRICS}:9090"
+    volumes:
+      - ./tests/integration/config/management.json:/etc/netbird/management.json
+    command: ["--log-file", "console", "--port", "33073", "--config", "/etc/netbird/management.json"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      relay:
+        condition: service_healthy
+    networks:
+      - nb-control
+      - nb-public
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.netbird-backend.rule=PathPrefix(`/api`) || PathPrefix(`/oauth2`)
+      - traefik.http.routers.netbird-backend.entrypoints=web
+      - traefik.http.routers.netbird-backend.priority=100
+      - traefik.http.routers.netbird-backend.service=mgmt-api
+      - traefik.http.routers.netbird-grpc.rule=PathPrefix(`/management.ManagementService/`) || PathPrefix(`/management.ProxyService/`)
+      - traefik.http.routers.netbird-grpc.entrypoints=web
+      - traefik.http.routers.netbird-grpc.priority=100
+      - traefik.http.routers.netbird-grpc.service=mgmt-grpc
+      - traefik.http.services.mgmt-api.loadbalancer.server.port=33073
+      - traefik.http.services.mgmt-grpc.loadbalancer.server.port=33073
+      - traefik.http.services.mgmt-grpc.loadbalancer.server.scheme=h2c
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/metrics"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  mgmt-2:
+    build:
+      context: .
+      dockerfile: management/Dockerfile
+    container_name: nb-mgmt-2
+    hostname: mgmt-2.${NB_DOMAIN}
+    environment:
+      NB_LOG_LEVEL: ${NB_LOG_LEVEL}
+      NB_LOG_FILE: ${NB_LOG_FILE}
+      NB_STORE_ENGINE: postgres
+      NB_STORE_ENGINE_POSTGRES_DSN: postgres://${NB_POSTGRES_USER}:${NB_POSTGRES_PASSWORD}@${NB_POSTGRES_HOST}:${NB_POSTGRES_PORT}/${NB_POSTGRES_DB}?sslmode=${NB_POSTGRES_SSLMODE}
+      NB_AUTH_STORE_DSN: postgres://${NB_POSTGRES_USER}:${NB_POSTGRES_PASSWORD}@${NB_POSTGRES_HOST}:${NB_POSTGRES_PORT}/netbird_auth?sslmode=${NB_POSTGRES_SSLMODE}
+      NB_ACTIVITY_EVENT_STORE_ENGINE: postgres
+      NB_ACTIVITY_EVENT_POSTGRES_DSN: postgres://${NB_POSTGRES_USER}:${NB_POSTGRES_PASSWORD}@${NB_POSTGRES_HOST}:${NB_POSTGRES_PORT}/netbird_events?sslmode=${NB_POSTGRES_SSLMODE}
+      NB_HA_ENABLED: ${NB_HA_ENABLED}
+      NB_HA_REDIS_ADDRESS: ${NB_REDIS_ADDRESS}
+      NB_HA_INSTANCE_ID: mgmt-2
+      NB_MGMT_PEERS_REGISTRY_KEY: ${NB_MGMT_PEERS_REGISTRY_KEY}
+      NB_MGMT_ACCOUNT_CHANNEL_PREFIX: ${NB_MGMT_ACCOUNT_CHANNEL_PREFIX}
+      NB_MGMT_LOCK_PREFIX: ${NB_MGMT_LOCK_PREFIX}
+      NB_MGMT_LOGIN_FILTER_KEY: ${NB_MGMT_LOGIN_FILTER_KEY}
+      NB_MGMT_EPHEMERAL_KEY: ${NB_MGMT_EPHEMERAL_KEY}
+      NB_MGMT_PEER_TTL: ${NB_MGMT_PEER_TTL}
+      NB_MGMT_HEARTBEAT_INTERVAL: ${NB_MGMT_HEARTBEAT_INTERVAL}
+      NB_MGMT_LOCK_TTL: ${NB_MGMT_LOCK_TTL}
+      NB_MGMT_METRICS_PORT: "9090"
+    ports:
+      - "${NB_HOST_MGMT2_PORT}:33073"
+      - "${NB_HOST_MGMT2_METRICS}:9090"
+    volumes:
+      - ./tests/integration/config/management-2.json:/etc/netbird/management.json
+    command: ["--log-file", "console", "--port", "33073", "--config", "/etc/netbird/management.json"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      relay:
+        condition: service_healthy
+    networks:
+      - nb-control
+      - nb-public
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.netbird-backend-2.rule=PathPrefix(`/api`) || PathPrefix(`/oauth2`)
+      - traefik.http.routers.netbird-backend-2.entrypoints=web
+      - traefik.http.routers.netbird-backend-2.priority=100
+      - traefik.http.routers.netbird-backend-2.service=mgmt-api
+      - traefik.http.routers.netbird-grpc-2.rule=PathPrefix(`/management.ManagementService/`) || PathPrefix(`/management.ProxyService/`)
+      - traefik.http.routers.netbird-grpc-2.entrypoints=web
+      - traefik.http.routers.netbird-grpc-2.priority=100
+      - traefik.http.routers.netbird-grpc-2.service=mgmt-grpc
+      - traefik.http.services.mgmt-api.loadbalancer.server.port=33073
+      - traefik.http.services.mgmt-grpc.loadbalancer.server.port=33073
+      - traefik.http.services.mgmt-grpc.loadbalancer.server.scheme=h2c
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/metrics"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # --- Traefik Reverse Proxy ---
+  traefik:
+    image: traefik:v3.6
+    container_name: nb-traefik
+    hostname: traefik.${NB_DOMAIN}
+    restart: unless-stopped
+    command:
+      - "--log.level=INFO"
+      - "--accesslog=true"
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.websecure.transport.respondingTimeouts.readTimeout=0"
+      - "--entrypoints.websecure.transport.respondingTimeouts.writeTimeout=0"
+      - "--entrypoints.websecure.transport.respondingTimeouts.idleTimeout=0"
+      - "--serverstransport.forwardingtimeouts.responseheadertimeout=0s"
+      - "--serverstransport.forwardingtimeouts.idleconntimeout=0s"
+    ports:
+      - "8088:80"
+      - "8443:443"
+      - "8089:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.traefik-api.rule=PathPrefix(`/api`)
+      - traefik.http.routers.traefik-api.entrypoints=web
+      - traefik.http.routers.traefik-api.priority=100
+      - traefik.http.routers.traefik-api.service=api@internal
+    networks:
+      - nb-public
+      - nb-control
+    depends_on:
+      - mgmt-1
+      - signal-1
+      - dashboard
+
+  dashboard:
+    image: netbirdio/dashboard:latest
+    container_name: nb-dashboard
+    hostname: dashboard.${NB_DOMAIN}
+    environment:
+      NETBIRD_MGMT_API_ENDPOINT: http://localhost:8088
+      NETBIRD_MGMT_GRPC_API_ENDPOINT: http://localhost:8088
+      NETBIRD_SIGNAL_GRPC_API_ENDPOINT: http://localhost:8088
+      AUTH_AUTHORITY: http://localhost:8088/oauth2
+      AUTH_CLIENT_ID: netbird-dashboard
+      AUTH_AUDIENCE: netbird-dashboard
+      AUTH_SUPPORTED_SCOPES: openid profile email groups
+      USE_AUTH0: "false"
+      AUTH_REDIRECT_URI: /nb-auth
+      AUTH_SILENT_REDIRECT_URI: /nb-silent-auth
+      NGINX_SSL_PORT: 443
+      LETSENCRYPT_DOMAIN: none
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.netbird-dashboard.rule=PathPrefix(`/`)
+      - traefik.http.routers.netbird-dashboard.entrypoints=web
+      - traefik.http.routers.netbird-dashboard.priority=1
+      - traefik.http.services.dashboard.loadbalancer.server.port=80
+    networks:
+      - nb-public
+
+  # --- Test Agents ---
+  agent-a:
+    build:
+      context: .
+      dockerfile: tests/integration/Dockerfile.agent
+    container_name: nb-agent-a
+    hostname: agent-a.${NB_DOMAIN}
+    environment:
+      NB_SETUP_KEY: "E2808C99-E7FA-4841-845E-07CE633E50A1"
+      NB_MANAGEMENT_URL: http://nb-traefik:80
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv6.conf.all.forwarding=1
+    networks:
+      - nb-agent-a
+      - nb-public
+    command: ["sleep", "infinity"]
+
+  agent-b:
+    build:
+      context: .
+      dockerfile: tests/integration/Dockerfile.agent
+    container_name: nb-agent-b
+    hostname: agent-b.${NB_DOMAIN}
+    environment:
+      NB_SETUP_KEY: "E2808C99-E7FA-4841-845E-07CE633E50A1"
+      NB_MANAGEMENT_URL: http://nb-traefik:80
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv6.conf.all.forwarding=1
+    networks:
+      - nb-agent-b
+      - nb-public
+    command: ["sleep", "infinity"]
+
+  # --- Test Runner ---
+  test-runner:
+    build:
+      context: .
+      dockerfile: tests/integration/Dockerfile.test
+    container_name: nb-test-runner
+    environment:
+      NB_DOMAIN: ${NB_DOMAIN}
+      REDIS_ADDR: ${NB_REDIS_ADDRESS}
+      MGMT1_ADDR: mgmt-1.${NB_DOMAIN}:33073
+      MGMT2_ADDR: mgmt-2.${NB_DOMAIN}:33073
+      MGMT_TRAEFIK_ADDR: traefik.${NB_DOMAIN}:80
+      SIGNAL1_ADDR: signal-1.${NB_DOMAIN}:10000
+      SIGNAL2_ADDR: signal-2.${NB_DOMAIN}:10000
+      SIGNAL_TRAEFIK_ADDR: traefik.${NB_DOMAIN}:80
+      POSTGRES_DSN: postgres://${NB_POSTGRES_USER}:${NB_POSTGRES_PASSWORD}@${NB_POSTGRES_HOST}:${NB_POSTGRES_PORT}/${NB_POSTGRES_DB}?sslmode=${NB_POSTGRES_SSLMODE}
+    volumes:
+      - ./tests/integration:/tests:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      mgmt-1:
+        condition: service_healthy
+      mgmt-2:
+        condition: service_healthy
+      signal-1:
+        condition: service_healthy
+      signal-2:
+        condition: service_healthy
+    networks:
+      - nb-control
+      - nb-public
+    command: ["sleep", "infinity"]
+
+volumes:
+  redis-data:
+  postgres-data:
+
+networks:
+  nb-control:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+  nb-public:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.1.0/24
+  nb-agent-a:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.1.0/24
+  nb-agent-b:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.2.0/24

@@ -23,6 +23,7 @@ import (
 	"github.com/netbirdio/netbird/management/server/idp"
 	"github.com/netbirdio/netbird/management/server/metrics"
 	"github.com/netbirdio/netbird/management/server/store"
+	"github.com/netbirdio/netbird/shared/distributed"
 	"github.com/netbirdio/netbird/util/wsproxy"
 	wsproxyserver "github.com/netbirdio/netbird/util/wsproxy/server"
 	"github.com/netbirdio/netbird/version"
@@ -73,6 +74,8 @@ type BaseServer struct {
 	errCh  chan error
 	wg     sync.WaitGroup
 	cancel context.CancelFunc
+
+	redisClient *distributed.Client
 }
 
 // Config holds the configuration parameters for creating a new server
@@ -115,6 +118,15 @@ func (s *BaseServer) Start(ctx context.Context) error {
 	srvCtx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
 	s.errCh = make(chan error, 4)
+
+	if s.Config.HA != nil && s.Config.HA.Enabled {
+		redisClient, err := distributed.NewClient(*s.Config.HA)
+		if err != nil {
+			return fmt.Errorf("failed to create Redis client: %w", err)
+		}
+		s.redisClient = redisClient
+		Inject(s, redisClient)
+	}
 
 	if s.autoResolveDomains {
 		s.resolveDomains(srvCtx)
@@ -254,6 +266,9 @@ func (s *BaseServer) Stop() error {
 	}
 	_ = s.Store().Close(ctx)
 	_ = s.EventStore().Close(ctx)
+	if s.redisClient != nil {
+		_ = s.redisClient.Close()
+	}
 	if s.update != nil {
 		s.update.StopWatch()
 	}

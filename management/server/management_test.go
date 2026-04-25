@@ -256,6 +256,8 @@ func startServer(
 		server.MockIntegratedValidator{},
 		networkMapController,
 		nil,
+		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("failed creating management server: %v", err)
