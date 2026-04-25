@@ -38,6 +38,7 @@ services:
       - "${NB_HOST_POSTGRES_PORT}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - ./postgres-init.sh:/docker-entrypoint-initdb.d/create-additional-dbs.sh
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${NB_POSTGRES_USER} -d ${NB_POSTGRES_DB}"]
       interval: 5s
@@ -206,6 +207,9 @@ services:
       NB_LOG_FILE: ${NB_LOG_FILE}
       NB_STORE_ENGINE: postgres
       NB_STORE_ENGINE_POSTGRES_DSN: postgres://${NB_POSTGRES_USER}:${NB_POSTGRES_PASSWORD}@${NB_POSTGRES_HOST}:${NB_POSTGRES_PORT}/${NB_POSTGRES_DB}?sslmode=${NB_POSTGRES_SSLMODE}
+      NB_AUTH_STORE_DSN: postgres://${NB_POSTGRES_USER}:${NB_POSTGRES_PASSWORD}@${NB_POSTGRES_HOST}:${NB_POSTGRES_PORT}/netbird_auth?sslmode=${NB_POSTGRES_SSLMODE}
+      NB_ACTIVITY_EVENT_STORE_ENGINE: postgres
+      NB_ACTIVITY_EVENT_POSTGRES_DSN: postgres://${NB_POSTGRES_USER}:${NB_POSTGRES_PASSWORD}@${NB_POSTGRES_HOST}:${NB_POSTGRES_PORT}/netbird_events?sslmode=${NB_POSTGRES_SSLMODE}
       NB_HA_ENABLED: ${NB_HA_ENABLED}
       NB_HA_REDIS_ADDRESS: ${NB_REDIS_ADDRESS}
       NB_HA_INSTANCE_ID: mgmt-1
@@ -265,6 +269,9 @@ services:
       NB_LOG_FILE: ${NB_LOG_FILE}
       NB_STORE_ENGINE: postgres
       NB_STORE_ENGINE_POSTGRES_DSN: postgres://${NB_POSTGRES_USER}:${NB_POSTGRES_PASSWORD}@${NB_POSTGRES_HOST}:${NB_POSTGRES_PORT}/${NB_POSTGRES_DB}?sslmode=${NB_POSTGRES_SSLMODE}
+      NB_AUTH_STORE_DSN: postgres://${NB_POSTGRES_USER}:${NB_POSTGRES_PASSWORD}@${NB_POSTGRES_HOST}:${NB_POSTGRES_PORT}/netbird_auth?sslmode=${NB_POSTGRES_SSLMODE}
+      NB_ACTIVITY_EVENT_STORE_ENGINE: postgres
+      NB_ACTIVITY_EVENT_POSTGRES_DSN: postgres://${NB_POSTGRES_USER}:${NB_POSTGRES_PASSWORD}@${NB_POSTGRES_HOST}:${NB_POSTGRES_PORT}/netbird_events?sslmode=${NB_POSTGRES_SSLMODE}
       NB_HA_ENABLED: ${NB_HA_ENABLED}
       NB_HA_REDIS_ADDRESS: ${NB_REDIS_ADDRESS}
       NB_HA_INSTANCE_ID: mgmt-2
@@ -281,7 +288,7 @@ services:
       - "${NB_HOST_MGMT2_PORT}:33073"
       - "${NB_HOST_MGMT2_METRICS}:9090"
     volumes:
-      - ./tests/integration/config/management.json:/etc/netbird/management.json
+      - ./tests/integration/config/management-2.json:/etc/netbird/management.json
     command: ["--log-file", "console", "--port", "33073", "--config", "/etc/netbird/management.json"]
     depends_on:
       postgres:
@@ -325,7 +332,6 @@ services:
       - "--api.insecure=true"
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
-      - "--providers.docker.network=netbird_ha_nb-public"
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
       - "--entrypoints.websecure.transport.respondingTimeouts.readTimeout=0"
@@ -347,6 +353,7 @@ services:
       - traefik.http.routers.traefik-api.service=api@internal
     networks:
       - nb-public
+      - nb-control
     depends_on:
       - mgmt-1
       - signal-1
@@ -375,10 +382,6 @@ services:
       - traefik.http.routers.netbird-dashboard.entrypoints=web
       - traefik.http.routers.netbird-dashboard.priority=1
       - traefik.http.services.dashboard.loadbalancer.server.port=80
-      - traefik.http.routers.traefik-api.rule=PathPrefix(`/api`)
-      - traefik.http.routers.traefik-api.entrypoints=web
-      - traefik.http.routers.traefik-api.priority=100
-      - traefik.http.routers.traefik-api.service=api@internal
     networks:
       - nb-public
 
@@ -391,7 +394,7 @@ services:
     hostname: agent-a.${NB_DOMAIN}
     environment:
       NB_SETUP_KEY: "E2808C99-E7FA-4841-845E-07CE633E50A1"
-      NB_MANAGEMENT_URL: http://mgmt-1.nb-ha.local:33073
+      NB_MANAGEMENT_URL: http://nb-traefik:80
     cap_add:
       - NET_ADMIN
     sysctls:
@@ -410,7 +413,7 @@ services:
     hostname: agent-b.${NB_DOMAIN}
     environment:
       NB_SETUP_KEY: "E2808C99-E7FA-4841-845E-07CE633E50A1"
-      NB_MANAGEMENT_URL: http://mgmt-2.nb-ha.local:33073
+      NB_MANAGEMENT_URL: http://nb-traefik:80
     cap_add:
       - NET_ADMIN
     sysctls:

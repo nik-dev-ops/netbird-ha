@@ -15,6 +15,15 @@ sysctl -w net.ipv6.conf.all.forwarding=1 2>/dev/null || true
 # Create netbird config directory
 mkdir -p /etc/netbird
 
+# Install and start netbird service if not already done
+if ! netbird service status 2>/dev/null; then
+    echo "Installing netbird service..."
+    netbird service install
+    echo "Starting netbird service..."
+    netbird service start
+    sleep 2
+fi
+
 # If setup key is provided, run netbird up
 if [ -n "$NB_SETUP_KEY" ]; then
     echo "Connecting to management server..."

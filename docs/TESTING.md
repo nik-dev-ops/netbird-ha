@@ -376,9 +376,36 @@ Performs authenticated HTTP requests against the management REST API using a PAT
 |------|---------|
 | `Dockerfile.test` | Test runner image: Go 1.25, Docker CLI, Redis client, psql, full project copy |
 | `Dockerfile.agent` | NetBird agent image for real peer connectivity tests |
-| `config/management.json` | Self-hosted management config with embedded IdP, STUN/TURN, relay |
+| `config/management.json` | Management config for mgmt-1 (Signal: signal-1.nb-ha.local) |
+| `config/management-2.json` | Management config for mgmt-2 (Signal: signal-2.nb-ha.local) |
 | `scripts/agent-setup.sh` | Agent bootstrap: login, up, status |
 | `go.mod` / `go.sum` | Test dependencies: redis, testify, grpc, wireguard |
+
+### Management Server Configs
+
+Each management server uses a separate config file:
+
+| File | Signal URI | Used By |
+|------|-----------|---------|
+| `management.json` | `signal-1.nb-ha.local:10000` | mgmt-1 |
+| `management-2.json` | `signal-2.nb-ha.local:10000` | mgmt-2 |
+
+This ensures agents connecting to different management servers get assigned to different signal servers, enabling proper HA testing.
+
+### PostgreSQL Databases
+
+The test environment creates 3 databases automatically:
+
+```bash
+# Main database
+docker exec nb-postgres psql -U netbird -d netbird -c "SELECT 1;"
+
+# Auth database (embedded IdP / Dex)
+docker exec nb-postgres psql -U netbird -d netbird_auth -c "SELECT 1;"
+
+# Events database (activity logs)
+docker exec nb-postgres psql -U netbird -d netbird_events -c "SELECT 1;"
+```
 
 ---
 
@@ -402,8 +429,12 @@ docker exec nb-redis redis-cli PUBLISH nb:signal:instance:signal-1 ping
 ### Check PostgreSQL
 
 ```bash
+# Main database
 docker exec nb-postgres psql -U netbird -d netbird -c "SELECT id, email, role FROM users;"
 docker exec nb-postgres psql -U netbird -d netbird -c "SELECT id, name FROM setup_keys;"
+
+# All databases
+docker exec nb-postgres psql -U netbird -l
 ```
 
 ### Check Traefik routing

@@ -171,7 +171,7 @@ curl -I http://localhost:8088
 1. Open `http://localhost:8088` in a browser
 2. Log in with the embedded IdP:
    - Email: `admin@nb-ha.local`
-   - Password: `testadmin123`
+   - Password: `Admin123!`
 3. If you see "User Approval Pending", run:
    ```bash
    docker exec nb-postgres psql -U netbird -d netbird \
@@ -270,6 +270,16 @@ Edit `docker-compose.ha-test.yml` and add:
 - Set appropriate maxmemory policy (`allkeys-lru`)
 
 ### PostgreSQL
+
+The HA deployment uses **3 PostgreSQL databases** (created automatically by `postgres-init.sh`):
+
+| Database | Purpose | Tables |
+|----------|---------|--------|
+| `netbird` | Main store | users, accounts, peers, setup_keys, rules, policies |
+| `netbird_auth` | Embedded IdP (Dex) | OAuth tokens, connectors, auth requests |
+| `netbird_events` | Activity store | Audit logs, event history |
+
+**Note**: Each database has its own user (`netbird`). The `postgres-init.sh` script runs automatically on PostgreSQL container startup to create `netbird_auth` and `netbird_events` if they don't exist.
 
 - Use PostgreSQL 15+ with streaming replication for HA
 - Enable connection pooling (PgBouncer)

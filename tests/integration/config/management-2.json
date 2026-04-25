@@ -29,7 +29,7 @@
     },
     "Signal": {
         "Proto": "http",
-        "URI": "signal-1.nb-ha.local:10000",
+        "URI": "signal-2.nb-ha.local:10000",
         "Username": "",
         "Password": ""
     },

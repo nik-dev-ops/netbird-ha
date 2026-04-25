@@ -71,7 +71,7 @@ This fork adds Redis-based distributed state to enable multiple Signal and Manag
 | **Signal Server** | WebRTC signaling, peer message relay | 2+ |
 | **Management Server** | Peer auth, network maps, policies | 2+ |
 | **Redis** | Distributed state, pub/sub, locks | 1 (or Sentinel/Cluster) |
-| **PostgreSQL** | Persistent account, peer, policy data | 1 |
+| **PostgreSQL** | 3 databases: netbird (main), netbird_auth (Dex IdP), netbird_events (activity) | 1+ |
 | **Relay** | Fallback peer relay (self-hosted) | 1 |
 | **coturn** | STUN/TURN for NAT traversal | 1 |
 | **Dashboard** | Web UI (Next.js via Traefik) | 1 |
@@ -276,7 +276,7 @@ See [docs/REBASE_GUIDE.md](docs/REBASE_GUIDE.md) for step-by-step rebase instruc
 netbird_ha/
 ├── .env.example                    # All configuration
 ├── docker-compose.ha-test.yml      # Full test stack
-├── README_HA.md                    # This file
+├── README.md                       # This file (HA fork main documentation)
 ├── README_FORK.md                  # Fork summary
 ├── combined/                       # Combined signal+mgmt binary
 ├── client/                         # NetBird client (unchanged)

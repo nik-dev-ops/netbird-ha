@@ -11,11 +11,21 @@ The tests assume a Docker Compose environment with the following services:
 | Service | Address | Purpose |
 |---------|---------|---------|
 | Redis | `redis.nb-ha.local:6379` | Distributed state and pub/sub |
-| Postgres | `postgres.nb-ha.local:5432` | Shared database |
+| PostgreSQL | `postgres.nb-ha.local:5432` | 3 databases: netbird, netbird_auth, netbird_events |
 | Signal-1 | `signal-1.nb-ha.local:10000` | Signal server instance 1 |
 | Signal-2 | `signal-2.nb-ha.local:10000` | Signal server instance 2 |
 | Mgmt-1 | `mgmt-1.nb-ha.local:33073` | Management server instance 1 |
 | Mgmt-2 | `mgmt-2.nb-ha.local:33073` | Management server instance 2 |
+
+### PostgreSQL Databases
+
+The HA deployment uses 3 PostgreSQL databases:
+
+| Database | Purpose |
+|----------|---------|
+| `netbird` | Main store: users, accounts, peers, setup_keys, rules, policies |
+| `netbird_auth` | Embedded IdP (Dex): OAuth tokens, connectors |
+| `netbird_events` | Activity store: audit logs, events |
 
 ## Files
 
@@ -49,11 +59,11 @@ The tests assume a Docker Compose environment with the following services:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SIGNAL1_ADDR` | `signal-1.nb-ha.local:10000` | Signal-1 gRPC endpoint |
-| `SIGNAL2_ADDR` | `signal-2.nb-ha.local:10000` | Signal-2 gRPC endpoint |
-| `MGMT1_ADDR` | `mgmt-1.nb-ha.local:33073` | Mgmt-1 HTTP/gRPC endpoint |
-| `MGMT2_ADDR` | `mgmt-2.nb-ha.local:33073` | Mgmt-2 HTTP/gRPC endpoint |
-| `REDIS_ADDR` | `redis.nb-ha.local:6379` | Redis endpoint |
+| `SIGNAL1_ADDR` | `localhost:10000` | Signal-1 gRPC endpoint |
+| `SIGNAL2_ADDR` | `localhost:10000` | Signal-2 gRPC endpoint |
+| `MGMT1_ADDR` | `localhost:33073` | Mgmt-1 HTTP/gRPC endpoint |
+| `MGMT2_ADDR` | `localhost:33073` | Mgmt-2 HTTP/gRPC endpoint |
+| `REDIS_ADDR` | `localhost:6379` | Redis endpoint |
 | `MGMT_TOKEN` | *(none)* | PAT for management HTTP API |
 | `POSTGRES_DSN` | *(see script)* | Postgres connection string |
 
@@ -89,6 +99,12 @@ volumes:
    messaging continues.
 4. **`TestSignalGracefulDegradation`** — Stop Redis, verify local-only mode still
    works for peers on the same instance.
+5. **`TestSignalRedisChannelIsolation`** — Each signal instance has its own Redis
+   pub/sub channel and messages are not broadcast to all instances.
+6. **`TestSignalTraefikLoadBalancing`** — Peers connecting through Traefik are
+   distributed across both signal instances.
+7. **`TestSignalTraefikFailover`** — When a signal instance dies, peer reconnects
+   through Traefik to the surviving instance and messaging continues.
 
 ### Management HA Tests (`management_ha_test.go`)
 
@@ -100,15 +116,24 @@ volumes:
    (`SET NX EX`) and release (`DEL`) using the management lock prefix.
 4. **`TestManagementInstanceFailover`** — Stop mgmt-1, peer reconnects to mgmt-2,
    Sync stream resumes.
+5. **`TestManagementHealthConsistency`** — Both management instances report
+   healthy status via their metrics endpoints.
+6. **`TestManagementPolicyPropagation`** — Policies and groups created via one
+   management instance are visible via the other (shared database consistency).
+7. **`TestManagementFailoverWithSync`** — Full login + sync from both management
+   instances using the same peer key after failover.
 
 ## Idempotent Initialization
 
 `scripts/init-test-data.sh` is safe to run multiple times. It will:
 
+- Ensure the `netbird_auth` and `netbird_events` databases exist
 - Create the owner user (if instance setup is required)
 - Create a reusable setup key for integration tests
 - Create a Personal Access Token (PAT) for HTTP API access
 - Create test peers in the database
+
+**Note**: The `postgres-init.sh` script (run automatically on PostgreSQL container startup) creates the `netbird_auth` and `netbird_events` databases if they don't exist.
 
 All operations check for existing data before inserting.
 
